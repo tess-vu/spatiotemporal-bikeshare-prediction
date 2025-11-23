@@ -1,0 +1,1440 @@
+---
+title: SPACE-TIME PREDICTION OF BIKE SHARE DEMAND
+subtitle: Q1 2025 VS 2015–2025 HISTORICAL MODEL
+date: 2025-11-17
+author:
+  - name: Tess Vu
+    email:
+      - tessavu@proton.me
+      - tessavu@upenn.edu
+    corresponding: TRUE
+affiliation:
+  - name: University of Pennsylvania
+    department: Urban Spatial Analytics (MUSA)
+    city: Philadelphia
+    state: PA
+    url: https://www.design.upenn.edu/urban-spatial-analytics
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc_float: true
+    toc-expand: true
+    smooth-scroll: true
+    embed-resources: true
+    title-block-style: default
+execute:
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# PART I: TEMPORAL
+
+## 1. Data Download
+
+[**Indego Bikeshare Data**](https://www.rideindego.com/about/data/)
+Downloaded for all years, from launch in 2015 thru present 2025. No data on Q1 2015 (launched in Q2 2015), no data on Q4 2024 at this time.
+
+[**Iowa Environmental Mesonet (IEM) ASOS PHL Weather Station**](https://mesonet.agron.iastate.edu/request/download.phtml?network=PA_ASOS)
+Downloaded for years aligning with Indego, from launch in 2015 thru present 2025. Issue through riem library where it wouldn't specifically download 03/2024 for some reason.
+
+```{r libraries}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(zoo)
+library(sf)
+library(tigris)
+library(tidycensus)
+library(viridis)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(here)
+library(patchwork)
+library(scales)
+library(showtext)
+library(sysfonts)
+
+# Avoid spherical issues with joins.
+sf_use_s2(FALSE)
+
+# Load fonts
+font_add_google("Outfit", "outfit")
+font_add_google("Anonymous Pro", "anonymous")
+showtext_opts(dpi = 300)
+showtext_auto()
+
+# Get rid of scientific notation.
+options(scipen = 999)
+```
+
+```{r plot-themes}
+theme_plot <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face = "bold",
+                                family = "outfit",
+                                color = "#2d2a26",
+                                size = base_size + 1,
+                                hjust = 0.5
+                                ),
+      plot.subtitle = element_text(face = "italic",
+                                   family = "outfit",
+                                   color = "#51534a",
+                                   size = base_size - 1,
+                                   hjust = 0.5,
+                                   margin = margin(b = 0.5, unit = "cm")
+                                   ),
+      plot.caption = element_text(face = "italic",
+                                  family = "anonymous",
+                                  color = "#9b9e98",
+                                  size = base_size - 2
+                                  ),
+      legend.position = "bottom",
+      panel.grid.major = element_line(colour = "#d4d2cd"),
+      panel.grid.minor = element_line(colour = "#d4d2cd"),
+      axis.text = element_text(face = "italic",
+                               family = "anonymous",
+                               size = base_size - 2,
+                               hjust = 0.5
+                               ),
+      axis.title = element_text(face = "bold",
+                                family = "anonymous",
+                                size = base_size - 1,
+                                hjust = 0.5
+                                ),
+      axis.title.y = element_text(margin = margin(r = 0.5, unit = "cm")
+                                  ),
+      axis.title.x = element_text(margin = margin(t = 0.5, unit = "cm")
+                                  ),
+      legend.title = element_text(face = "italic",
+                                  family = "anonymous",
+                                  size = base_size - 1,
+                                  hjust = 0.5
+                                  ),
+      legend.title.position = "top",
+      legend.text = element_text(face = "italic",
+                                 family = "anonymous",
+                                 size = base_size - 2,
+                                 hjust = 0.5
+                                 ),
+      legend.key.width = unit(2, "cm"),
+      legend.key.height = unit(0.5, "cm"),
+      legend.background = element_rect(fill = "#f5f4f0", color = "#f5f4f0"),
+      plot.background = element_rect(fill = "#f5f4f0", color = "#f5f4f0"),
+      panel.background = element_rect(fill = "#f5f4f0", color = "#f5f4f0"),
+      plot.margin = unit(c(1, 1, 1, 1), "cm")
+    )
+  }
+
+theme_map <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face = "bold",
+                                family = "outfit",
+                                color = "#2d2a26",
+                                size = base_size + 1,
+                                hjust = 0.5
+                                ),
+      plot.subtitle = element_text(face = "italic",
+                                   family = "outfit",
+                                   color = "#51534a",
+                                   size = base_size - 1,
+                                   hjust = 0.5,
+                                   margin = margin(b = 0.5, unit = "cm")
+                                   ),
+      plot.caption = element_text(face = "italic",
+                                  family = "anonymous",
+                                  color = "#9b9e98",
+                                  size = base_size - 3
+                                  ),
+      legend.position = "bottom",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      legend.title = element_text(face = "italic",
+                                  family = "anonymous",
+                                  size = base_size - 1,
+                                  hjust = 0.5
+                                  ),
+      legend.title.position = "top",
+      legend.text = element_text(face = "italic",
+                                 family = "anonymous",
+                                 size = base_size - 3,
+                                 hjust = 0.5
+                                 ),
+      legend.key.width = unit(2, "cm"),
+      legend.key.height = unit(0.5, "cm"),
+      legend.background = element_rect(fill = "#f5f4f0", color = "#f5f4f0"),
+      plot.background = element_rect(fill = "#f5f4f0", color = "#f5f4f0"),
+      panel.background = element_rect(fill = "#f5f4f0", color = "#f5f4f0"),
+      plot.margin = unit(c(1, 1, 1, 1), "cm")
+    )
+  }
+```
+
+```{r census-key}
+census_api_key <- Sys.getenv("CENSUS_API_KEY")
+```
+
+# Data Loading and Preparation
+
+## Load and Clean Bike Share Data
+
+```{r bike-data}
+# Load bike data.
+bike_data <- read.csv("data/indego_2015_2025.csv")
+
+# Combined historical dataset has various date formats.
+date_formats <- c(
+  "%m/%d/%Y %H:%M", # 1/1/2020 10:30
+  "%Y-%m-%d %H:%M:%S", # 2020-01-01 10:30:00
+  "%m/%d/%y %H:%M", # 1/1/20 10:30
+  "%m/%d/%Y %I:%M:%S %p", # 1/1/2020 10:30:00 AM/PM
+  "%m/%d/%Y %I:%M %p" # 1/1/2020 10:30 AM/PM
+  )
+
+# Parse dates and clean data.
+bike_data <- bike_data %>%
+  mutate(
+    start_datetime_new = parse_date_time(start_time, orders = date_formats),
+    end_datetime_new = parse_date_time(end_time, orders = date_formats)
+    ) %>%
+  filter(
+    !is.na(start_datetime_new),
+    !is.na(end_datetime_new),
+    !is.na(start_station_id),
+    duration > 0,
+    start_lon >= -75.30, start_lon <= -74.95,
+    start_lat >= 39.85, start_lat <= 40.20
+    ) %>%
+  mutate(
+    start_time = start_datetime_new,
+    end_time = end_datetime_new,
+    date = as_date(start_time),
+    year = year(start_time),
+    interval60 = floor_date(start_time, unit = "hour"),
+    quarter_year = paste0("Q", quarter(start_time), " ", year(start_time))
+    ) %>%
+  filter(year >= 2015) %>%
+  select(-c(start_datetime_new, end_datetime_new))
+```
+
+## Subset Data by Time Period
+
+```{r data-subsets}
+# Q1 2025.
+bike_q1_2025 <- bike_data %>%
+  filter(year == 2025, quarter(start_time) == 1)
+
+# Trips.
+cat("Q1 2025 Trips:", format(nrow(bike_q1_2025), big.mark = ","), "\n")
+
+# Date range.
+cat("Date Range:", format(min(bike_q1_2025$date), "%Y-%m-%d"), 
+    "to", format(max(bike_q1_2025$date), "%Y-%m-%d"), "\n\n")
+
+# Unique stations.
+cat("Start Stations:", length(unique(bike_q1_2025$start_station)), "\n")
+
+# Trip types.
+table(bike_q1_2025$trip_route_category)
+
+# Passholder types.
+table(bike_q1_2025$passholder_type)
+
+# Bike types.
+table(bike_q1_2025$bike_type)
+
+# Historical.
+bike_all <- bike_data
+
+# Trips.
+cat("2015–2025 Trips:", format(nrow(bike_all), big.mark = ","), "\n")
+
+# Date range.
+cat("Date Range:", format(min(bike_all$date), "%Y-%m-%d"),
+    "to", format(max(bike_all$date), "%Y-%m-%d"), "\n")
+
+# Unique stations.
+cat("Start Stations:", length(unique(bike_all$start_station)), "\n")
+
+# Trip types.
+table(bike_all$trip_route_category)
+
+# Passholder types.
+table(bike_all$passholder_type)
+
+# Bike types.
+table(bike_all$bike_type)
+```
+
+## Create Hourly Panel Data
+
+```{r panel-function}
+# Function to aggregate trips to station-hour level.
+make_hourly_panel <- function(data_frame) {
+  data_frame %>%
+    mutate(
+      date = as_date(start_time),
+      dow = wday(date, label = TRUE, week_start = 1),
+      is_weekend = dow %in% c("Sat", "Sun"),
+      month = month(date),
+      year = year(date),
+      hour = hour(start_time),
+      season = case_when(
+        month %in% c(12, 1, 2) ~ "Winter",
+        month %in% c(3, 4, 5) ~ "Spring",
+        month %in% c(6, 7, 8) ~ "Summer",
+        TRUE ~ "Fall"
+      )
+      ) %>%
+    group_by(
+      start_station_id, start_lat, start_lon,
+      interval60, date, year, month, dow, hour, is_weekend, season
+      ) %>%
+    summarize(trips = n(), .groups = "drop")
+}
+```
+
+```{r base-panels}
+# Create base panels.
+panel_q1_2025_base <- make_hourly_panel(bike_q1_2025)
+panel_all_base <- make_hourly_panel(bike_all)
+
+cat("Q1 2025 Base Panel:", format(nrow(panel_q1_2025_base), big.mark = ","), "rows\n")
+cat("Historical Base Panel:", format(nrow(panel_all_base), big.mark = ","), "rows\n")
+```
+
+# Exploratory Visualizations
+
+## Daily and Monthly Trip Patterns
+
+```{r trip-patterns}
+#| message: false
+#| warning: false
+#| fig-dpi: 300
+#| fig-height: 10
+#| fig-width: 12
+
+# Q1 2025 daily trips.
+daily_trips_q1_2025 <- panel_q1_2025_base %>%
+  group_by(date) %>%
+  summarize(trips = sum(trips), .groups = "drop")
+
+daily_trips_q1_2025_plot <- ggplot(daily_trips_q1_2025, aes(date, trips)) +
+  geom_line(color = "#778ac5", linewidth = 1) +
+  geom_smooth(se = FALSE, color = "#ff4100", linetype = "dashed") +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Indego Daily Trips",
+    subtitle = "Q1 2025",
+    x = "Date", y = "Trips"
+  ) +
+  theme_plot()
+
+# Historical daily trips.
+daily_trips_all <- panel_all_base %>%
+  group_by(date) %>%
+  summarize(trips = sum(trips), .groups = "drop")
+
+daily_trips_all_plot <- ggplot(daily_trips_all, aes(date, trips)) +
+  geom_line(color = "#778ac5", linewidth = 1) +
+  geom_smooth(se = FALSE, color = "#ff4100", linetype = "dashed") +
+  scale_y_continuous(labels = comma) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Indego Daily Trips",
+    subtitle = "Q2 2015–Q3 2025",
+    x = "Date", y = "Trips"
+  ) +
+  theme_plot()
+
+# Historical monthly trips.
+monthly_trips_all <- panel_all_base %>%
+  group_by(year, month) %>%
+  summarize(trips = sum(trips), .groups = "drop") %>%
+  mutate(date_month = make_date(year, month, 1))
+
+monthly_trips_all_plot <- ggplot(monthly_trips_all, aes(date_month, trips)) +
+  geom_line(color = "#778ac5", linewidth = 1) +
+  geom_smooth(se = FALSE, color = "#ff4100", linetype = "dashed") +
+  scale_y_continuous(labels = comma) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Indego Monthly Trips",
+    subtitle = "Q2 2015–Q3 2025",
+    x = "Date", y = "Trips"
+  ) +
+  theme_plot()
+
+daily_trips_q1_2025_plot / daily_trips_all_plot / monthly_trips_all_plot
+```
+
+# Census Data Integration
+
+## Load and Clean Census Data
+
+```{r census-data}
+#| message: false
+#| warning: false
+
+# Get 2023 ACS data, most recent and middle-ground between 2015 and 2025.
+philly_census <- suppressMessages(get_acs(
+  geography = "tract",
+  variables = c(
+    "B01003_001", # Total population.
+    "B19013_001", # Median household income.
+    "B08301_001", # Total commuters.
+    "B08301_010", # Commute by public transportation.
+    "B02001_002", # White alone.
+    "B25077_001"  # Median home value.
+  ),
+  state = "PA",
+  county = "Philadelphia",
+  year = 2023,
+  geometry = TRUE,
+  output = "wide"
+  ) %>%
+  rename(
+    total_pop = B01003_001E,
+    med_inc = B19013_001E,
+    total_commute = B08301_001E,
+    public_commute = B08301_010E,
+    white_pop = B02001_002E,
+    med_h_val = B25077_001E
+  ) %>%
+  mutate(
+    pct_public_commute = 100 * public_commute / pmax(total_commute, 1),
+    pct_white = 100 * white_pop / pmax(total_pop, 1)
+  ) %>%
+  st_transform(4326)
+)
+
+# Replace census placeholders with NA.
+bad_placeholders <- c(-666666666, -999999999, -6666666, -999999)
+
+philly_census <- philly_census %>%
+  mutate(across(
+    c(total_pop, med_inc, total_commute, public_commute, white_pop, med_h_val),
+    ~ case_when(.x %in% bad_placeholders ~ NA_real_, TRUE ~ .x)
+    )
+    )
+
+cat("Philadelphia Census Tracts:", nrow(philly_census), "\n")
+```
+
+## Create Station-Census Lookup Table
+
+```{r lookup-table}
+# Unique station locations.
+stations_geo <- bike_all %>%
+  group_by(start_station_id) %>%
+  summarize(
+    start_lat = first(start_lat),
+    start_lon = first(start_lon),
+    .groups = "drop"
+    ) %>%
+  filter(!is.na(start_lat), !is.na(start_lon))
+
+# Convert to sf object.
+stations_sf <- stations_geo %>%
+  st_as_sf(coords = c("start_lon", "start_lat"), crs = 4326)
+
+# Join stations to census.
+station_census_raw <- suppressMessages(
+  st_join(stations_sf, philly_census, join = st_intersects, left = TRUE)
+  )
+
+# Remove duplicates keep only first match per station.
+station_census_lookup <- station_census_raw %>%
+  st_drop_geometry() %>%
+  arrange(start_station_id, med_inc) %>%
+  group_by(start_station_id) %>%
+  slice(1) %>% # Keep only first match per station.
+  ungroup() %>%
+  select(start_station_id, med_inc, pct_public_commute, pct_white, total_pop) %>%
+  filter(!is.na(med_inc)) # Keep only residential stations, though not ideal real-life representation.
+
+# Get valid station list.
+valid_stations <- station_census_lookup$start_station_id
+
+# Add coordinates back.
+station_census_lookup <- station_census_lookup %>%
+  left_join(stations_geo, by = "start_station_id")
+
+# Verify no duplicates.
+n_duplicates <- station_census_lookup %>%
+  count(start_station_id) %>%
+  filter(n > 1) %>%
+  nrow()
+
+cat("Valid Residential Stations:", length(valid_stations), "\n")
+cat("Duplicate Stations:", n_duplicates, "\n")
+```
+
+```{r med-inc-bike-map}
+#| fig-height: 8
+#| fig-width: 8
+#| fig-dpi: 300
+
+stations_all <- bike_all %>%
+  distinct(start_station_id, start_lat, start_lon) %>%
+  filter(!is.na(start_lat), !is.na(start_lon))
+
+med_inc_station_map <- ggplot() +
+  geom_sf(data = philly_census, aes(fill = med_inc), color = NA) +
+  scale_fill_viridis(
+    option = "mako",
+    direction = -1,
+    name   = "Median Income",
+    labels = dollar,
+    na.value = "#9b9e98"
+    ) +
+  geom_point(
+    data = stations_all,
+    aes(x = start_lon, y = start_lat),
+    color = "#ff4100", size = 1, alpha = 0.8
+    ) +
+  labs(
+    title = "Indego Stations",
+    subtitle = "Philadelphia, PA",
+    caption = "Color: Median household income by census tracts."
+    ) +
+  theme_map()
+
+med_inc_station_map
+```
+
+## Map Stations and Census Context
+
+```{r station-maps}
+#| fig-height: 12
+#| fig-width: 12
+#| fig-dpi: 300
+
+# Stations and median income map.
+med_inc_station_map <- ggplot() +
+  geom_sf(data = philly_census, aes(fill = med_inc), color = NA) +
+  scale_fill_viridis(
+    option = "mako",
+    direction = -1,
+    name = "Median Income",
+    labels = dollar,
+    na.value = "#9b9e98"
+    ) +
+  geom_point(
+    data = stations_geo,
+    aes(x = start_lon, y = start_lat),
+    color = "#ff4100", size = 1, alpha = 0.8
+    ) +
+  labs(
+    title = "Indego Stations",
+    subtitle = "Philadelphia, PA"
+    ) +
+  theme_map()
+
+# Missing stations map.
+stations_for_map <- stations_geo %>%
+  left_join(
+    station_census_lookup %>% select(start_station_id, med_inc),
+    by = "start_station_id"
+    ) %>%
+  mutate(has_census = !is.na(med_inc))
+
+missing_station_map <- ggplot() +
+  geom_sf(data = philly_census, aes(fill = med_inc), color = NA) +
+  scale_fill_viridis(
+    option = "mako",
+    direction = -1,
+    name = "Median Income",
+    labels = dollar,
+    na.value = "#9b9e98"
+    ) +
+  geom_point(
+    data = stations_for_map %>% filter(has_census),
+    aes(start_lon, start_lat),
+    color = "#51534a", size = 1, alpha = 0.6
+    ) +
+  geom_point(
+    data = stations_for_map %>% filter(!has_census),
+    aes(start_lon, start_lat),
+    color = "#ff4100", size = 1, shape = 4, stroke = 1
+    ) +
+  labs(
+    title = "Indego Stations and Census Matches",
+    subtitle = "Philadelphia, PA",
+    caption = "Orange X: Stations without tract-level demographics.\nColor: Median household income by census tract."
+    ) +
+  theme_map()
+
+(med_inc_station_map | missing_station_map) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom",
+        legend.direction = "horizontal")
+```
+
+# Weather Data Integration
+
+## Load and Clean Weather Data
+
+```{r weather-data}
+#| message: false
+#| warning: false
+
+# Load weather data from IEM ASOS, had issues fetching with riem library likely due to large volume request.
+weather_data <- read.csv("data/PHL.csv") %>%
+  select(valid, tmpf, dwpf, relh, sknt, p01i, vsby, gust, wxcodes, feel) %>%
+  rename(
+    interval60 = valid,
+    temp = tmpf,
+    dew = dwpf,
+    humid = relh,
+    wind = sknt,
+    precip = p01i,
+    visibility = vsby,
+    w_code = wxcodes
+    )
+
+# Replace null strings with NA.
+weather_data[weather_data == "null"] <- NA
+
+# Clean and interpolate weather data.
+weather_clean <- weather_data %>%
+  # Make sure interval60 types align and have same time zone.
+  mutate(
+    interval60 = as.POSIXct(interval60, format = "%Y-%m-%d %H:%M", tz = "UTC"),
+    # Make sure this rounds to hour or else the merge will NA almost everything.
+    interval60 = floor_date(interval60, unit = "hour"),
+    # Numeric conversion.
+    temp = as.numeric(temp),
+    precip = as.numeric(precip),
+    dew = as.numeric(dew),
+    humid = as.numeric(humid),
+    wind = as.numeric(wind),
+    visibility = as.numeric(visibility),
+    feel = as.numeric(feel),
+    gust = as.numeric(gust)
+    ) %>%
+  # Keep unique times.
+  distinct(interval60, .keep_all = TRUE) %>%
+  arrange(interval60) %>%
+  mutate(
+    # Interpolation should be okay due to small number of missingness and low hourly variation.
+    temp = na.approx(temp, na.rm = FALSE),
+    dew = na.approx(dew, na.rm = FALSE),
+    humid = na.approx(humid, na.rm = FALSE),
+    wind = na.approx(wind, na.rm = FALSE),
+    visibility = na.approx(visibility, na.rm = FALSE),
+    feel = na.approx(feel, na.rm = FALSE),
+    precip = ifelse(is.na(precip), 0, precip),
+    gust = ifelse(is.na(gust), 0, gust),
+    w_code = case_when(
+      is.na(w_code) | w_code == "" ~ "CLR",
+      TRUE ~ w_code
+    )
+  )
+
+cat("Weather:", format(nrow(weather_clean), big.mark = ","), "\n")
+```
+
+## Visualize Weather Patterns
+
+```{r weather-plots}
+#| message: false
+#| warning: false
+#| fig-dpi: 300
+#| fig-height: 10
+#| fig-width: 12
+
+# Q1 2025 daily temperature.
+weather_q1_2025 <- weather_clean %>%
+  filter(
+    interval60 >= min(panel_q1_2025_base$interval60),
+    interval60 <= max(panel_q1_2025_base$interval60)
+    )
+
+weather_q1_2025_plot <- ggplot(weather_q1_2025, aes(interval60, temp)) +
+  geom_line(color = "#00a557") +
+  geom_smooth(se = FALSE, color = "#ff4100") +
+  labs(
+    title = "Philadelphia Temperature",
+    subtitle = "Q1 2025",
+    x = "Date", y = "Temperature (°F)"
+    ) +
+  theme_plot()
+
+# Historical daily temperature, very noisy.
+weather_all_daily <- weather_clean %>%
+  filter(
+    interval60 >= min(panel_all_base$interval60),
+    interval60 <= max(panel_all_base$interval60)
+    )
+
+weather_all_daily_plot <- ggplot(weather_all_daily, aes(x = as.Date(interval60), temp)) +
+  geom_line(color = "#00a557") +
+  geom_smooth(se = FALSE, color = "#ff4100") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Philadelphia Temperature",
+    subtitle = "Q2 2015–Q3 2025",
+    x = "Date", y = "Temperature (°F)"
+    ) +
+  theme_plot()
+
+# Historical monthly temperature, more stable and granular.
+weather_all_monthly <- weather_clean %>%
+  group_by(year = year(interval60), month = month(interval60)) %>%
+  summarize(
+    temp = mean(temp, na.rm = TRUE),
+    date_month = make_date(year, month, 1),
+    .groups = "drop"
+    )
+
+weather_all_monthly_plot <- ggplot(weather_all_monthly, aes(date_month, temp)) +
+  geom_line(color = "#00a557", linewidth = 1) +
+  geom_smooth(se = FALSE, color = "#ff4100", linetype = "dashed") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Philadelphia Temperature",
+    subtitle = "Q2 2015–Q3 2025",
+    x = "Date", y = "Temperature (°F)"
+    ) +
+  theme_plot()
+
+weather_q1_2025_plot / weather_all_daily_plot / weather_all_monthly_plot
+```
+
+## Seasonal Temperature Trends
+
+```{r seasonal-weather}
+#| message: false
+#| warning: false
+#| fig-dpi: 300
+#| fig-height: 10
+#| fig-width: 12
+
+# Seasonal weather trends.
+weather_season_avg <- weather_clean %>%
+  group_by(year = year(interval60), season = quarter(interval60)) %>%
+  summarize(temp = mean(temp, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    season_label = case_when(
+      season == 1 ~ "Winter (Q1)",
+      season == 2 ~ "Spring (Q2)",
+      season == 3 ~ "Summer (Q3)",
+      season == 4 ~ "Fall (Q4)"
+    )
+  )
+
+# Faceted plot.
+ggplot(weather_season_avg, aes(x = year, y = temp)) +
+  geom_line(color = "#1492D3", linewidth = 1) +
+  geom_smooth(se = FALSE, color = "#F03E36", linetype = "dashed") +
+  facet_wrap(~ season_label, ncol = 2) +
+  labs(
+    title = "Historical Average Temperature by Season",
+    subtitle = "Q2 2015–Q3 2025",
+    caption = "Long-term trends in seasonal temperatures",
+    x = "Year", y = "Average Temperature (°F)"
+    ) +
+  theme_plot() +
+  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 10))
+```
+
+# Build Complete Space-Time Panel
+
+## Q1 2025 Complete Panel
+
+```{r complete-panel-q1-setup}
+# Filter to valid stations.
+panel_q1_2025_base <- panel_q1_2025_base %>%
+  filter(start_station_id %in% valid_stations)
+
+# Get unique times and stations.
+unique_times_q1 <- unique(panel_q1_2025_base$interval60) %>% sort()
+unique_stations_q1 <- valid_stations
+
+cat("Q1 2025 Complete Panel:\n")
+cat("Stations:", length(unique_stations_q1), "\n")
+cat("Time Periods:", format(length(unique_times_q1), big.mark = ","), "\n")
+cat("Expected Rows:", format(length(unique_stations_q1) * length(unique_times_q1), big.mark = ","))
+```
+
+```{r complete-panel-q1-create}
+# Create complete grid.
+complete_grid_q1 <- expand.grid(
+  interval60 = unique_times_q1,
+  start_station_id = unique_stations_q1,
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+  )
+
+# Get time variables from interval60.
+complete_grid_q1 <- complete_grid_q1 %>%
+  mutate(
+    date = as_date(interval60),
+    year = year(interval60),
+    month = month(interval60),
+    dow = wday(date, label = TRUE, week_start = 1),
+    hour = hour(interval60),
+    is_weekend = dow %in% c("Sat", "Sun"),
+    season = case_when(
+      month %in% c(12, 1, 2) ~ "Winter",
+      month %in% c(3, 4, 5) ~ "Spring",
+      month %in% c(6, 7, 8) ~ "Summer",
+      TRUE ~ "Fall"
+      )
+    )
+```
+
+```{r complete-panel-q1-merge}
+# Merge trip counts.
+panel_q1_with_trips <- complete_grid_q1 %>%
+  left_join(
+    panel_q1_2025_base %>% select(start_station_id, interval60, trips),
+    by = c("start_station_id", "interval60")
+    ) %>%
+  mutate(trips = replace_na(trips, 0))
+
+# Add station attributes.
+panel_q1_with_station <- panel_q1_with_trips %>%
+  left_join(station_census_lookup, by = "start_station_id")
+
+# Add weather data.
+panel_q1_with_weather <- panel_q1_with_station %>%
+  left_join(weather_clean, by = "interval60")
+```
+
+```{r complete-panel-q1-lag}
+# Calculate temporal lags.
+panel_q1_2025 <- panel_q1_with_weather %>%
+  arrange(start_station_id, interval60) %>%
+  group_by(start_station_id) %>%
+  mutate(
+    lag_1hr = lag(trips, 1),
+    lag_2hr = lag(trips, 2),
+    lag_3hr = lag(trips, 3),
+    lag_12hr = lag(trips, 12),
+    lag_1day = lag(trips, 24),
+    avg_7day = rollapply(trips, 168, mean, fill = NA, align = "right")
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(avg_7day))
+
+cat("Final Q1 2025 Panel:", format(nrow(panel_q1_2025), big.mark = ","), "\n")
+```
+
+## Historical Complete Panel
+
+```{r complete-panel-historical-setup}
+# Filter to valid stations.
+panel_all_base <- panel_all_base %>%
+  filter(start_station_id %in% valid_stations)
+
+# Get unique times and stations.
+unique_times_all <- unique(panel_all_base$interval60) %>% sort()
+unique_stations_all <- valid_stations
+
+cat("Historical Complete Panel:\n")
+cat("Stations:", length(unique_stations_all), "\n")
+cat("Time Periods:", format(length(unique_times_all), big.mark = ","), "\n")
+cat( "Expected Rows", format(length(unique_stations_all) * length(unique_times_all), big.mark = ","), "\n\n" )
+```
+
+```{r complete-panel-historical-create}
+# Create complete grid.
+complete_grid_all <- expand.grid(
+  interval60 = unique_times_all,
+  start_station_id = unique_stations_all,
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Get time variables from interval60.
+complete_grid_all <- complete_grid_all %>%
+  mutate(
+    date = as_date(interval60),
+    year = year(interval60),
+    month = month(interval60),
+    dow = wday(date, label = TRUE, week_start = 1),
+    hour = hour(interval60),
+    is_weekend = dow %in% c("Sat", "Sun"),
+    season = case_when(
+      month %in% c(12, 1, 2) ~ "Winter",
+      month %in% c(3, 4, 5) ~ "Spring",
+      month %in% c(6, 7, 8) ~ "Summer",
+      TRUE ~ "Fall"
+    )
+  )
+```
+
+```{r complete-panel-historical-merge}
+# Merge trip counts.
+panel_all_with_trips <- complete_grid_all %>%
+  left_join(
+    panel_all_base %>% select(start_station_id, interval60, trips),
+    by = c("start_station_id", "interval60")
+  ) %>%
+  mutate(trips = replace_na(trips, 0))
+
+# Add station attributes.
+panel_all_with_station <- panel_all_with_trips %>%
+  left_join(station_census_lookup, by = "start_station_id")
+
+# Add weather data.
+panel_all_with_weather <- panel_all_with_station %>%
+  left_join(weather_clean, by = "interval60")
+
+# Remove duplicates.
+panel_all_with_weather <- panel_all_with_weather %>%
+  distinct(start_station_id, interval60, .keep_all = TRUE)
+```
+
+```{r complete-panel-historical-lag}
+# Temporal lags.
+panel_all <- panel_all_with_weather %>%
+  arrange(start_station_id, interval60) %>%
+  group_by(start_station_id) %>%
+  mutate(
+    lag_1hr = lag(trips, 1),
+    lag_2hr = lag(trips, 2),
+    lag_3hr = lag(trips, 3),
+    lag_12hr = lag(trips, 12),
+    lag_1day = lag(trips, 24),
+    avg_7day = rollapply(trips, 168, mean, fill = NA, align = "right")
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(avg_7day))
+
+cat("Final Historical Panel:", format(nrow(panel_all), big.mark = ","), "\n")
+```
+
+# Visualize Temporal Patterns
+
+## Lag Plots
+
+```{r lag-plots}
+#| fig-dpi: 300
+#| fig-height: 16
+#| fig-width: 18
+
+# Historical lag patterns.
+lag_data_long_all <- panel_all %>%
+  filter(start_station_id == 3010) %>%
+  head(168) %>%
+  select(interval60, current_trips = trips, lag_1hr, lag_2hr, lag_3hr, lag_12hr, lag_1day) %>%
+  pivot_longer(
+    cols = starts_with("lag"),
+    names_to = "lag_type",
+    values_to = "lag_value"
+    ) %>%
+  mutate(lag_type = factor(
+    lag_type,
+    levels = c("lag_1hr", "lag_2hr", "lag_3hr", "lag_12hr", "lag_1day"),
+    labels = c("1 Hour Ago", "2 Hours Ago", "3 Hours Ago", "12 Hours Ago", "24 Hours Ago")
+    )
+    )
+
+lag_facet_plot_all <- ggplot(lag_data_long_all, aes(x = interval60)) +
+  geom_line(aes(y = current_trips, color = "Current Demand"), linewidth = 0.75, alpha = 0.8) +
+  geom_line(aes(y = lag_value, color = "Lagged Demand"), linewidth = 0.75, linetype = "dashed") +
+  facet_wrap(~ lag_type, scales = "free_x", ncol = 2) +
+  scale_color_manual(
+    name = NULL,
+    values = c("Current Demand" = "#4A6F53", "Lagged Demand" = "#f48f33")
+    ) +
+  labs(
+    title = "One Week Short-Term vs. Daily Temporal Lags",
+    subtitle = "Q2 2015–Q3 2025",
+    caption = "Station 3010: 15th & Spruce",
+    x = "Date and Time",
+    y = "Average Trip Count"
+    ) +
+  theme_plot() +
+  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 10))
+
+# Q1 2025 lag patterns.
+lag_data_long_q1_2025 <- panel_q1_2025 %>%
+  filter(start_station_id == 3010) %>%
+  head(168) %>%
+  select(interval60, current_trips = trips, lag_1hr, lag_2hr, lag_3hr, lag_12hr, lag_1day) %>%
+  pivot_longer(
+    cols = starts_with("lag"),
+    names_to = "lag_type",
+    values_to = "lag_value"
+  ) %>%
+  mutate(lag_type = factor(
+    lag_type,
+    levels = c("lag_1hr", "lag_2hr", "lag_3hr", "lag_12hr", "lag_1day"),
+    labels = c("1 Hour Ago", "2 Hours Ago", "3 Hours Ago", "12 Hours Ago", "24 Hours Ago")
+  ))
+
+lag_facet_plot_q1_2025 <- ggplot(lag_data_long_q1_2025, aes(x = interval60)) +
+  geom_line(aes(y = current_trips, color = "Current Demand"), linewidth = 0.75, alpha = 0.8) +
+  geom_line(aes(y = lag_value, color = "Lagged Demand"), linewidth = 0.75, linetype = "dashed") +
+  facet_wrap(~ lag_type, scales = "free_x", ncol = 2) +
+  scale_color_manual(
+    name = NULL,
+    values = c("Current Demand" = "#4A6F53", "Lagged Demand" = "#f48f33")
+  ) +
+  labs(
+    title = "One Week Short-Term vs. Daily Temporal Lags",
+    subtitle = "Q1 2025",
+    x = "Date and Time",
+    y = "Trip Count"
+  ) +
+  theme_plot() +
+  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 10))
+
+(lag_facet_plot_q1_2025 / lag_facet_plot_all) +
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom",
+        legend.direction = "horizontal")
+```
+
+## Hourly Ridership Patterns
+
+```{r hourly-patterns}
+#| fig-dpi: 300
+#| fig-height: 10
+#| fig-width: 12
+
+# Historical hourly patterns.
+hourly_patterns_all <- panel_all %>%
+  group_by(hour, is_weekend) %>%
+  summarize(avg_trips = mean(trips, na.rm = TRUE), .groups = "drop") %>%
+  mutate(day_type = ifelse(is_weekend, "Weekend", "Weekday"))
+
+hourly_patterns_all_plot <- ggplot(hourly_patterns_all, aes(x = hour, y = avg_trips, color = day_type)) +
+  geom_line(linewidth = 1.5) +
+  scale_color_manual(values = c("Weekday" = "#08519c", "Weekend" = "#6baed6")) +
+  labs(
+    title = "Average Hourly Ridership Patterns",
+    subtitle = "Q2 2015–Q3 2025",
+    x = "Hour of Day",
+    y = "Average Trips per Hour",
+    color = "Day Type"
+    ) +
+  theme_plot()
+
+# Q1 2025 hourly patterns
+hourly_patterns_q1_2025 <- panel_q1_2025 %>%
+  group_by(hour, is_weekend) %>%
+  summarize(avg_trips = mean(trips, na.rm = TRUE), .groups = "drop") %>%
+  mutate(day_type = ifelse(is_weekend, "Weekend", "Weekday"))
+
+hourly_patterns_q1_2025_plot <- ggplot(hourly_patterns_q1_2025, aes(x = hour, y = avg_trips, color = day_type)) +
+  geom_line(linewidth = 1.5) +
+  scale_color_manual(values = c("Weekday" = "#08519c", "Weekend" = "#6baed6")) +
+  labs(
+    title = "Average Hourly Ridership Patterns",
+    subtitle = "Q1 2025",
+    caption = "Average trips per station",
+    x = "Hour of Day",
+    y = "Average Trips per Hour",
+    color = "Day Type"
+    ) +
+  theme_plot()
+
+hourly_patterns_all_plot / hourly_patterns_q1_2025_plot
+```
+
+## Top Stations Table
+
+```{r top-stations}
+top_stations <- bike_all %>%
+  count(start_station_id, start_lat, start_lon, name = "trips") %>%
+  arrange(desc(trips)) %>%
+  head(20)
+
+kable(
+  top_stations,
+  caption = "Top 20 Indego Stations by Trip Origins",
+  format.args = list(big.mark = ",")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Train/Test Split
+
+## Historical Data Split
+
+```{r train-test-historical}
+cat("Historical Train/Test Split\n")
+
+split_date <- as.Date("2024-01-01")
+
+# Stations in both periods.
+early_stations <- panel_all %>%
+  filter(date < split_date) %>%
+  distinct(start_station_id) %>%
+  pull(start_station_id)
+
+late_stations <- panel_all %>%
+  filter(date >= split_date) %>%
+  distinct(start_station_id) %>%
+  pull(start_station_id)
+
+common_stations_all <- intersect(early_stations, late_stations)
+
+cat("Early Stations (Date < 2024-01-01):", length(early_stations), "\n")
+cat("Late Stations (Date >= 2024-01-01):", length(late_stations), "\n")
+cat("Both Period Stations:", length(common_stations_all), "\n")
+
+# Train and test sets.
+train <- panel_all %>%
+  filter(start_station_id %in% common_stations_all, date < split_date)
+
+test <- panel_all %>%
+  filter(start_station_id %in% common_stations_all, date >= split_date)
+
+cat("\nHistorical Training Observations:", format(nrow(train), big.mark = ","), "\n")
+cat("Historical Testing Observations:", format(nrow(test), big.mark = ","), "\n")
+cat("Historical Training Date Range:", format(min(train$date), big.mark = ","), "to", format(max(train$date), big.mark = ","), "\n")
+cat("Historical Testing Date Range:", format(min(test$date), big.mark = ","), "to", format(max(test$date), big.mark = ","), "\n")
+```
+
+## Q1 2025 Data Split
+
+```{r train-test-q1}
+cat("Q1 2025 Train/Test Split\n")
+
+# Add week number.
+panel_q1_2025 <- panel_q1_2025 %>%
+  mutate(week = as.numeric(week(date)))
+
+min_week <- 10
+
+# Stations in both periods.
+early_stations_q1 <- panel_q1_2025 %>%
+  filter(week < min_week) %>%
+  distinct(start_station_id) %>%
+  pull(start_station_id)
+
+late_stations_q1 <- panel_q1_2025 %>%
+  filter(week >= min_week) %>%
+  distinct(start_station_id) %>%
+  pull(start_station_id)
+
+common_stations_q1 <- intersect(early_stations_q1, late_stations_q1)
+
+cat("Early Stations (Weeks < 10):", length(early_stations_q1), "\n")
+cat("Late Stations (Weeks >= 10):", length(late_stations_q1), "\n")
+cat("Both Period Stations:", length(common_stations_q1), "\n")
+
+# Train and test sets.
+train_q1 <- panel_q1_2025 %>%
+  filter(start_station_id %in% common_stations_q1, week < min_week)
+
+test_q1 <- panel_q1_2025 %>%
+  filter(start_station_id %in% common_stations_q1, week >= min_week)
+
+cat("\nQ1 2025 Training Observations:", format(nrow(train_q1), big.mark = ","), "\n")
+cat("Q1 2025 Testing Observations:", format(nrow(test_q1), big.mark = ","), "\n")
+cat("Q1 2025 Training Date Range:", format(min(train_q1$date), big.mark = ","), "to", format(max(train_q1$date), big.mark = ","), "\n")
+cat("Q1 2025 Testing Date Range:", format(min(test_q1$date), big.mark = ","), "to", format(max(test_q1$date), big.mark = ","), "\n")
+```
+
+# Modeling Preparation
+
+```{r prepare-modeling-data}
+cat("Modeling Preparation\n")
+
+# Model predictors.
+model_predictors <- c(
+  "trips", "hour", "dow", "temp", "precip",
+  "lag_1hr", "lag_3hr", "lag_1day",
+  "med_inc", "pct_public_commute", "pct_white",
+  "start_station_id", "feel", "gust", "w_code"
+)
+
+# Day of week levels.
+dow_levels <- c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+# Historical train set.
+train_clean <- train %>%
+  mutate(dow_simple = factor(dow, levels = dow_levels)) %>%
+  drop_na(all_of(model_predictors))
+
+contrasts(train_clean$dow_simple) <- contr.treatment(7)
+
+# Historical test set.
+test_clean <- test %>%
+  mutate(dow_simple = factor(dow, levels = dow_levels)) %>%
+  drop_na(all_of(model_predictors))
+
+# Q1 2025 train set.
+train_q1_clean <- train_q1 %>%
+  mutate(dow_simple = factor(dow, levels = dow_levels)) %>%
+  drop_na(all_of(model_predictors))
+
+contrasts(train_q1_clean$dow_simple) <- contr.treatment(7)
+
+# Q1 2025 test set.
+test_q1_clean <- test_q1 %>%
+  mutate(dow_simple = factor(dow, levels = dow_levels)) %>%
+  drop_na(all_of(model_predictors))
+
+cat("\nFinal Clean Dataset Dimensions:\n")
+cat("Historical Train:", dim(train_clean), "\n")
+cat("Historical Test:", dim(test_clean), "\n")
+cat("Q1 2025 Train:", dim(train_q1_clean), "\n")
+cat("Q1 2025 Test:", dim(test_q1_clean), "\n")
+```
+
+```{r model-1-historical}
+model1_all <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip,
+  data = train_clean
+)
+
+summary(model1_all)
+```
+
+```{r model-1-q1-2025}
+model1_q1 <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip,
+  data = train_q1_clean
+)
+
+summary(model1_q1)
+```
+
+```{r model-2-historical}
+model2_all <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day,
+  data = train_clean
+)
+
+summary(model2_all)
+```
+
+```{r model-2-q1-2025}
+model2_q1 <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day,
+  data = train_q1_clean
+)
+
+summary(model2_q1)
+```
+
+```{r model-3-historical}
+model3_all <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day +
+    med_inc + pct_public_commute + pct_white,
+  data = train_clean
+)
+
+summary(model3_all)
+```
+
+```{r model-3-q1-2025}
+model3_q1_2025 <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day +
+    med_inc + pct_public_commute + pct_white,
+  data = train_q1_clean
+)
+
+summary(model3_q1_2025)
+```
+
+```{r model-4-historical}
+model4_all <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day +
+    med_inc + pct_public_commute + pct_white +
+    as.factor(start_station_id),
+  data = train_clean
+)
+
+# Summary too long, just show key metrics.
+cat("Model 4 R²:", summary(model4_all)$r.squared, "\n")
+cat("Model 4 Adjusted R²:", summary(model4_all)$adj.r.squared, "\n")
+```
+
+```{r model-4-q1-2025}
+model4_q1_2025 <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day +
+    med_inc + pct_public_commute + pct_white +
+    as.factor(start_station_id),
+  data = train_q1_clean
+)
+
+# Summary too long, just show key metrics.
+cat("Model 4 R²:", summary(model4_q1_2025)$r.squared, "\n")
+cat("Model 4 Adjusted R²:", summary(model4_q1_2025)$adj.r.squared, "\n")
+```
+
+```{r model-5-historical}
+model5_all <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day +
+    med_inc + pct_public_commute + pct_white +
+    as.factor(start_station_id) +
+    rush_hour * weekend, # Rush hour effects different on weekends.
+  data = train_clean
+)
+
+# Summary too long, just show key metrics.
+cat("Model 5 R²:", summary(model5_all)$r.squared, "\n")
+cat("Model 5 Adjusted R²:", summary(model5_all)$adj.r.squared, "\n")
+```
+
+```{r model-5-q1-2025}
+model5_q1_2025 <- lm(
+  trips ~ as.factor(hour) + dow_simple + temp + precip +
+    lag_1hr + lag_3hr + lag_1day +
+    med_inc + pct_public_commute + pct_white +
+    as.factor(start_station_id) +
+    rush_hour * weekend, # Rush hour effects different on weekends.
+  data = train_q1_clean
+)
+
+# Summary too long, just show key metrics.
+cat("Model 5 R²:", summary(model5_q1_2025)$r.squared, "\n")
+cat("Model 5 Adjusted R²:", summary(model5_q1_2025)$adj.r.squared, "\n")
+```
+
+2.  **Adapt this code** to work with your quarter:
+
+    -   Update date ranges for weather data
+    -   Check for any data structure changes
+    -   Create the same 5 models
+    -   Calculate MAE for each model
+
+3.  **Compare results** to Q1 2025:
+
+    -   How do MAE values compare? Why might they differ?
+    -   Are temporal patterns different (e.g., summer vs. winter)?
+    -   Which features are most important in your quarter?
+
+## PART II: ERROR ANALYSIS
+
+### 1. Spatial Patterns
+
+1.  **Spatial patterns:**
+
+    -   Create error maps
+    -   Identify neighborhoods with high errors
+    -   Hypothesize why (missing features? different demand patterns?)
+
+### 2. Temporal Patterns
+
+2.  **Temporal patterns:**
+
+    -   When are errors highest?
+    -   Do certain hours/days have systematic under/over-prediction?
+    -   Are there seasonal patterns?
+
+### 3. Demographic Patterns
+
+3.  **Demographic patterns:**
+
+    -   Relate errors to census characteristics
+    -   Are certain communities systematically harder to predict?
+    -   What are the equity implications?
+
+## PART III: FEATURE ENGINEERING & MODEL IMPROVEMENT
+
+### 1. Temporal Features
+
+*Temporal features:*
+
+-   Holiday indicators (Memorial Day, July 4th, Labor Day)
+-   School calendar (Penn, Drexel, Temple in session?)
+-   Special events (concerts, sports games, conventions)
+-   Day of month (payday effects?)
+
+### 2. Weather Features
+
+*Weather features:*
+
+-   Feels-like temperature (wind chill/heat index)
+-   "Perfect biking weather" indicator (60-75°F, no rain)
+-   Precipitation forecast (not just current)
+-   Weekend + nice weather interaction
+
+### 3. Spatial Features
+
+*Spatial features:*
+
+-   Distance to Center City
+-   Distance to nearest university
+-   Distance to nearest park
+-   Points of interest nearby (restaurants, offices, bars)
+-   Station capacity
+-   Bike lane connectivity
+
+### 4. Trip History Features
+
+*Trip history features:*
+
+-   Rolling 7-day average demand
+-   Same hour last week
+-   Station "type" clustering (residential, commercial, tourist)
+
+### 5. Other Contextual Features
+
+**Implementation:**
+
+-   Add your features to the best model
+-   Compare MAE before and after
+-   Explain *why* you chose these features
+-   Did they improve predictions? Where?
+
+**Try a poisson model for count data**
+
+-   Does this improve model fit?
+
+## PART IV: CRITICAL REFLECTION
+
+### 1. Operational Implications
+
+1.  **Operational implications:**
+    -   Is your final MAE "good enough" for Indego to use?
+    -   When do prediction errors cause problems for rebalancing?
+    -   Would you recommend deploying this system? Under what
+        conditions?
+        
+### 2. Equity Considerations
+
+2.  **Equity considerations:**
+    -   Do prediction errors disproportionately affect certain
+        neighborhoods?
+    -   Could this system worsen existing disparities in bike access?
+    -   What safeguards would you recommend?
+
+### 3. Model Limitations
+
+3.  **Model limitations:**
+    -   What patterns is your model missing?
+    -   What assumptions might not hold in real deployment?
+    -   How would you improve this with more time/data?
+
+## Submission
+
+1.  **Rmd file** with all your code (commented!)
+
+2.  **HTML output** with results and visualizations
+
+3.  **Brief report** summarizing (with supporting data & visualization):
+
+    -   Your quarter and why you chose it
+    -   Model comparison results
+    -   Error analysis insights
+    -   New features you added and why
+    -   Critical reflection on deployment
