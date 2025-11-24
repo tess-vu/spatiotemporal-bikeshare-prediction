@@ -61,6 +61,7 @@ library(patchwork)
 library(scales)
 library(showtext)
 library(sysfonts)
+library(glmnet)
 
 # Avoid spherical issues with joins.
 sf_use_s2(FALSE)
@@ -867,7 +868,9 @@ complete_grid_all <- complete_grid_all %>%
     month = month(interval60),
     dow = wday(date, label = TRUE, week_start = 1),
     hour = hour(interval60),
-    is_weekend = dow %in% c("Sat", "Sun"),
+    #is_weekend = dow %in% c("Sat", "Sun"),
+    is_weekend = ifelse(dow %in% c("Sat", "Sun"), 1, 0),
+    rush_hour = ifelse(hour %in% c(7, 8, 9, 16, 17, 18), 1, 0),
     season = case_when(
       month %in% c(12, 1, 2) ~ "Winter",
       month %in% c(3, 4, 5) ~ "Spring",
@@ -1263,6 +1266,13 @@ model4_all <- lm(
 # Summary too long, just show key metrics.
 cat("Model 4 R²:", summary(model4_all)$r.squared, "\n")
 cat("Model 4 Adjusted R²:", summary(model4_all)$adj.r.squared, "\n")
+
+model4_all <- model.matrix(trips ~ hour + dow_simple + temp + precip + lag_1hr + 
+                     lag_3hr + lag_1day + med_inc + pct_public_commute + 
+                     pct_white + as.factor(start_station_id),
+                   data = train_clean)
+
+fit <- cv.glmnet(X, train_clean$trips, family="gaussian")
 ```
 
 ```{r model-4-q1-2025}
