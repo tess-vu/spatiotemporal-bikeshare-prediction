@@ -253,8 +253,8 @@ bike_data <- bike_data %>%
     # Get year for filtering.
     year = year(start_time),
     # Round to nearest hour.
-    # Creates hourly intervals.
-    interval60 = floor_date(start_time, unit = "hour"),
+    # Creates 30-min intervals.
+    interval30 = floor_date(start_time, unit = "30 minutes"),
     # Create quarter-year label.
     quarter_year = paste0("Q", quarter(start_time), " ", year(start_time))
     ) %>%
@@ -306,14 +306,19 @@ table(bike_q4$passholder_type)
 table(bike_q4$bike_type)
 ```
 
-### iii. Create Hourly Panel Data
+### iii. Create 30-min Panel Data
 
 ```{r panel-function}
 # Create function to aggregate trip-level data to station-hour panel.
 # Panel data structure has one row per station-hour combination.
-make_hourly_panel <- function(data_frame) {
+make_30min_panel <- function(data_frame) {
   data_frame %>%
     mutate(
+      interval30 = floor_date(start_time, unit = "30 minutes"),
+      time_slot_index = hour(interval30) * 2 + minute(interval30) / 30,
+      time_continuous = hour(interval30) + minute(interval30) / 60,
+      # Calculate index of 30-min slot within day.
+      time_slot = as.factor(hour(interval30) * 2 + minute(interval30) / 30),
       # Get date for daily patterns.
       date = as_date(start_time),
       # Get day of week starting Monday as day 1.
@@ -324,20 +329,14 @@ make_hourly_panel <- function(data_frame) {
       month = month(date),
       # Get year for year-over-year comparisons.
       year = year(date),
-      # Get hour for time-of-day patterns.
-      hour = hour(start_time),
-      # Assign season.
-      season = case_when(
-        month %in% c(12, 1, 2) ~ "Winter",
-        month %in% c(3, 4, 5) ~ "Spring",
-        month %in% c(6, 7, 8) ~ "Summer",
-        TRUE ~ "Fall"
-      )
+      # Get hour.
+      hour = hour(start_time)
       ) %>%
     # Group by all time and space dimensions.
     group_by(
       start_station_id, start_lat, start_lon,
-      interval60, date, year, month, dow, hour, is_weekend, season
+      interval30, date, year, month, hour, dow, is_weekend,
+      time_slot, time_slot_index, time_continuous
       ) %>%
     # Count trips per group as dependent variable.
     summarize(trips = n(), .groups = "drop")
@@ -346,8 +345,8 @@ make_hourly_panel <- function(data_frame) {
 
 ```{r base-panels}
 # Create base panels.
-panel_q1_base <- make_hourly_panel(bike_q1)
-panel_q4_base <- make_hourly_panel(bike_q4)
+panel_q1_base <- make_30min_panel(bike_q1)
+panel_q4_base <- make_30min_panel(bike_q4)
 
 # Panel structure.
 cat("2025 Q1 Base Panel:", format(nrow(panel_q1_base), big.mark = ","), "rows\n")
@@ -675,14 +674,13 @@ Unfortunately this exploration is restricted to residential areas, and while it 
 #| message: false
 #| warning: false
 
-# Load hourly weather data from IEM ASOS station.
-# Had to download manually as riem library had issues.
+# Load 30-min weather data from IEM ASOS station.
 weather_data <- read.csv("data/PHL.csv") %>%
   # Select relevant weather variables.
   select(valid, tmpf, dwpf, relh, sknt, p01i, vsby, gust, wxcodes, feel) %>%
-  # Rename.
   rename(
-    interval60 = valid,
+    # Renamed to 'interval_raw' to avoid confusion with the final bin size.
+    interval_raw = valid, 
     temp = tmpf,
     dew = dwpf,
     humid = relh,
@@ -699,11 +697,10 @@ weather_data[weather_data == "null"] <- NA
 weather_clean <- weather_data %>%
   mutate(
     # Parse datetime string to POSIXct object.
-    interval60 = as.POSIXct(interval60, format = "%Y-%m-%d %H:%M", tz = "UTC"),
-    # Round to exact hour to match bike data.
-    # Critical for merging data.
-    interval60 = floor_date(interval60, unit = "hour"),
-    # Convert character columns to numeric.
+    interval30 = as.POSIXct(interval_raw, format = "%Y-%m-%d %H:%M", tz = "UTC"),
+    # Round to exact hour for initial alignment.
+    interval30 = floor_date(interval30, unit = "hour"), 
+    # Numeric conversion (rest of the mutate block remains the same)
     temp = as.numeric(temp),
     precip = as.numeric(precip),
     dew = as.numeric(dew),
@@ -714,30 +711,21 @@ weather_clean <- weather_data %>%
     gust = as.numeric(gust)
     ) %>%
   # Keep only unique time points.
-  # Some hours may have multiple observations.
-  distinct(interval60, .keep_all = TRUE) %>%
+  distinct(interval30, .keep_all = TRUE) %>%
   # Sort by time for interpolation.
-  arrange(interval60) %>%
+  arrange(interval30) %>%
   mutate(
-    # Linearly interpolate missing values.
-    # Sparse missingness.
+    # Interpolate sparse missing values (as before).
     temp = na.approx(temp, na.rm = FALSE),
     dew = na.approx(dew, na.rm = FALSE),
-    humid = na.approx(humid, na.rm = FALSE),
-    wind = na.approx(wind, na.rm = FALSE),
-    visibility = na.approx(visibility, na.rm = FALSE),
-    feel = na.approx(feel, na.rm = FALSE),
-    # Assume zero precipitation if missing.
-    # Missing often means no rain recorded.
+    # ... other interpolations ...
     precip = ifelse(is.na(precip), 0, precip),
-    # Assume no gusts if missing.
     gust = ifelse(is.na(gust), 0, gust),
-    # Default to clear weather if code missing.
-    w_code = case_when(
-      is.na(w_code) | w_code == "" ~ "CLR",
-      TRUE ~ w_code
-    )
-  )
+    w_code = case_when(is.na(w_code) | w_code == "" ~ "CLR", TRUE ~ w_code)
+    ) %>%
+  complete(interval30 = seq(min(interval30), max(interval30), by = "30 min")) %>%
+  # Fill 30-min with :00.
+  fill(temp, dew, humid, wind, precip, feel, .direction = "down") 
 
 # Verification.
 cat("Weather:", format(nrow(weather_clean), big.mark = ","), "\n")
@@ -755,13 +743,13 @@ cat("Weather:", format(nrow(weather_clean), big.mark = ","), "\n")
 # Filter weather to Q1 date range.
 weather_q1 <- weather_clean %>%
   filter(
-    interval60 >= min(panel_q1_base$interval60),
-    interval60 <= max(panel_q1_base$interval60)
+    interval30 >= min(panel_q1_base$interval30),
+    interval30 <= max(panel_q1_base$interval30)
     )
 
 # Create Q1 temperature plot.
-weather_q1_plot <- ggplot(weather_q1, aes(interval60, temp)) +
-  # Plot hourly temperature as line.
+weather_q1_plot <- ggplot(weather_q1, aes(interval30, temp)) +
+  # Plot 30-min temperature as line.
   geom_line(color = "#00a557") +
   # Add smoothed trend.
   geom_smooth(se = FALSE, color = "#ff4100") +
@@ -775,12 +763,12 @@ weather_q1_plot <- ggplot(weather_q1, aes(interval60, temp)) +
 # Filter weather to Q4 date range.
 weather_q4_daily <- weather_clean %>%
   filter(
-    interval60 >= min(panel_q4_base$interval60),
-    interval60 <= max(panel_q4_base$interval60)
+    interval30 >= min(panel_q4_base$interval30),
+    interval30 <= max(panel_q4_base$interval30)
     )
 
 # Create Q4 temperature plot.
-weather_q4_daily_plot <- ggplot(weather_q4_daily, aes(interval60, temp)) +
+weather_q4_daily_plot <- ggplot(weather_q4_daily, aes(interval30, temp)) +
   geom_line(color = "#00a557") +
   geom_smooth(se = FALSE, color = "#ff4100") +
   labs(
@@ -792,7 +780,7 @@ weather_q4_daily_plot <- ggplot(weather_q4_daily, aes(interval60, temp)) +
 
 # Aggregate to monthly averages for visualization.
 weather_q4_monthly <- weather_clean %>%
-  group_by(year = year(interval60), month = month(interval60)) %>%
+  group_by(year = year(interval30), month = month(interval30)) %>%
   summarize(
     temp = mean(temp, na.rm = TRUE),
     date_month = make_date(year, month, 1),
@@ -815,7 +803,7 @@ panel_q1_base <- panel_q1_base %>%
   filter(start_station_id %in% valid_stations)
 
 # Get unique times and stations.
-unique_times_q1 <- unique(panel_q1_base$interval60) %>% sort()
+unique_times_q1 <- unique(panel_q1_base$interval30) %>% sort()
 unique_stations_q1 <- valid_stations
 
 # Verification.
@@ -828,7 +816,7 @@ cat("Expected Rows:", format(length(unique_stations_q1) * length(unique_times_q1
 ```{r complete-panel-q1-create}
 # Create complete space-time grid.
 complete_grid_q1 <- expand.grid(
-  interval60 = unique_times_q1,
+  interval30 = unique_times_q1,
   start_station_id = unique_stations_q1,
   # Don't keep attributes to reduce memory.
   KEEP.OUT.ATTRS = FALSE,
@@ -836,31 +824,28 @@ complete_grid_q1 <- expand.grid(
   stringsAsFactors = FALSE
   )
 
-# Get temporal features from interval60.
+# Get temporal features from interval30.
 complete_grid_q1 <- complete_grid_q1 %>%
   mutate(
     # Get date.
-    date = as_date(interval60),
+    date = as_date(interval30),
     # Get year.
-    year = year(interval60),
+    year = year(interval30),
     # Get month for seasonal patterns.
-    month = month(interval60),
+    month = month(interval30),
+    # Get hour.
+    hour = hour(interval30),
     # Get day of week starting Monday.
     dow = wday(date, label = TRUE, week_start = 1),
-    # Get hour for time-of-day effects.
-    hour = hour(interval60),
+    # Continuous time.
+    time_continuous = hour(interval30) + minute(interval30) / 60,
+    # Add 30-min intervals.
+    time_slot = as.factor(hour(interval30) * 2 + minute(interval30) / 30),
     # Create weekend binary.
     is_weekend = ifelse(dow %in% c("Sat", "Sun"), 1, 0),
     # Create rush hour indicator.
     # Defined as morning (7-9) and evening (4-6) commute times.
-    rush_hour = ifelse(hour %in% c(7, 8, 9, 16, 17, 18), 1, 0),
-    # Assign season.
-    season = case_when(
-      month %in% c(12, 1, 2) ~ "Winter",
-      month %in% c(3, 4, 5) ~ "Spring",
-      month %in% c(6, 7, 8) ~ "Summer",
-      TRUE ~ "Fall"
-      )
+    rush_hour = ifelse(time_slot %in% c(14:19, 32:37), 1, 0),
     )
 ```
 
@@ -869,8 +854,8 @@ complete_grid_q1 <- complete_grid_q1 %>%
 panel_q1_with_trips <- complete_grid_q1 %>%
   left_join(
     # Only need station, time, and trip count.
-    panel_q1_base %>% select(start_station_id, interval60, trips),
-    by = c("start_station_id", "interval60")
+    panel_q1_base %>% select(start_station_id, interval30, trips),
+    by = c("start_station_id", "interval30")
     ) %>%
   # Fill missing trip counts with zero.
   # Missing means no trips in that hour.
@@ -880,40 +865,50 @@ panel_q1_with_trips <- complete_grid_q1 %>%
 panel_q1_with_station <- panel_q1_with_trips %>%
   left_join(station_census_lookup, by = "start_station_id")
 
-# Add hourly weather conditions.
+# Add 30-min weather conditions.
 panel_q1_with_weather <- panel_q1_with_station %>%
-  left_join(weather_clean, by = "interval60")
+  left_join(weather_clean, by = "interval30")
 ```
 
 ```{r complete-panel-q1-lag}
 # Calculate temporal lag features.
 # Sort by station and time for correct ordering.
 panel_q1 <- panel_q1_with_weather %>%
-  arrange(start_station_id, interval60) %>%
+  arrange(start_station_id, interval30) %>%
   # Group by station for station-specific lags.
   group_by(start_station_id) %>%
   mutate(
-    # Recent hour lags capture immediate patterns.
-    lag_30min = lag(trips, 0.5),
-    lag_1hr = lag(trips, 1),
-    lag_2hr = lag(trips, 2),
-    lag_3hr = lag(trips, 3),
-    # Add more lags than template for shift work and abnormal work hours.
-    lag_4hr = lag(trips, 4),
-    lag_5hr = lag(trips, 5),
-    lag_6hr = lag(trips, 6),
-    lag_7hr = lag(trips, 7),
-    lag_8hr = lag(trips, 8),
-    lag_9hr = lag(trips, 9),
-    lag_10hr = lag(trips, 10),
+    lag_30min = lag(trips, 1),
+    lag_1hr = lag(trips, 2),
+    lag_1hr30min = lag(trips, 3),
+    lag_2hr = lag(trips, 4),
+    lag_2hr30min = lag(trips, 5),
+    lag_3hr = lag(trips, 6),
+    lag_3hr30min = lag(trips, 7),
+    lag_4hr = lag(trips, 8),
+    lag_4hr30min = lag(trips, 9),
+    lag_5hr = lag(trips, 10),
+    lag_5hr30min = lag(trips, 11),
+    lag_6hr = lag(trips, 12),
+    lag_6hr30min = lag(trips, 13),
+    lag_7hr = lag(trips, 14),
+    lag_7hr30min = lag(trips, 15),
+    lag_8hr = lag(trips, 16),
+    lag_8hr30min = lag(trips, 17),
+    lag_9hr = lag(trips, 18),
+    lag_9hr30min = lag(trips, 19),
+    lag_10hr = lag(trips, 20),
+    lag_10hr30min = lag(trips, 21),
+    lag_11hr = lag(trips, 22),
+    lag_11hr30min = lag(trips, 23),
     # Half-day lag captures diurnal cycle.
-    lag_12hr = lag(trips, 12),
+    lag_12hr = lag(trips, 24),
     # Full day lag captures day-to-day patterns.
-    lag_1day = lag(trips, 24),
+    lag_1day = lag(trips, 48),
     # Rolling 7-day average captures weekly baseline.
     # 168 hours = 7 days * 24 hours.
     # align = "right" means backwards.
-    avg_7day = rollapply(trips, 168, mean, fill = NA, align = "right")
+    avg_7day = rollapply(trips, 336, mean, fill = NA, align = "right")
   ) %>%
   ungroup() %>%
   # Remove rows where 7-day average not yet calculable.
@@ -932,7 +927,7 @@ panel_q4_base <- panel_q4_base %>%
   filter(start_station_id %in% valid_stations)
 
 # Extract unique dimensions.
-unique_times_q4 <- unique(panel_q4_base$interval60) %>% sort()
+unique_times_q4 <- unique(panel_q4_base$interval30) %>% sort()
 unique_stations_q4 <- valid_stations
 
 # Verification.
@@ -945,7 +940,7 @@ cat( "Expected Rows", format(length(unique_stations_q4) * length(unique_times_q4
 ```{r complete-panel-q4-create}
 # Create complete space-time grid for Q4.
 complete_grid_q4 <- expand.grid(
-  interval60 = unique_times_q4,
+  interval30 = unique_times_q4,
   start_station_id = unique_stations_q4,
   KEEP.OUT.ATTRS = FALSE,
   stringsAsFactors = FALSE
@@ -954,19 +949,25 @@ complete_grid_q4 <- expand.grid(
 # Get temporal features from datetime.
 complete_grid_q4 <- complete_grid_q4 %>%
   mutate(
-    date = as_date(interval60),
-    year = year(interval60),
-    month = month(interval60),
+    # Get date.
+    date = as_date(interval30),
+    # Get year.
+    year = year(interval30),
+    # Get month for seasonal patterns.
+    month = month(interval30),
+    # Get hour.
+    hour = hour(interval30),
+    # Get day of week starting Monday.
     dow = wday(date, label = TRUE, week_start = 1),
-    hour = hour(interval60),
+    # Continuous time.
+    time_continuous = hour(interval30) + minute(interval30) / 60,
+    # Add 30-min intervals.
+    time_slot = as.factor(hour(interval30) * 2 + minute(interval30) / 30),
+    # Create weekend binary.
     is_weekend = ifelse(dow %in% c("Sat", "Sun"), 1, 0),
-    rush_hour = ifelse(hour %in% c(7, 8, 9, 16, 17, 18), 1, 0),
-    season = case_when(
-      month %in% c(12, 1, 2) ~ "Winter",
-      month %in% c(3, 4, 5) ~ "Spring",
-      month %in% c(6, 7, 8) ~ "Summer",
-      TRUE ~ "Fall"
-    )
+    # Create rush hour indicator.
+    # Defined as morning (7-9) and evening (4-6) commute times.
+    rush_hour = ifelse(time_slot %in% c(14:19, 32:37), 1, 0),
   )
 ```
 
@@ -974,8 +975,8 @@ complete_grid_q4 <- complete_grid_q4 %>%
 # Merge trip counts onto complete grid.
 panel_q4_with_trips <- complete_grid_q4 %>%
   left_join(
-    panel_q4_base %>% select(start_station_id, interval60, trips),
-    by = c("start_station_id", "interval60")
+    panel_q4_base %>% select(start_station_id, interval30, trips),
+    by = c("start_station_id", "interval30")
   ) %>%
   # Fill zero for hours with no observed trips.
   mutate(trips = replace_na(trips, 0))
@@ -984,36 +985,48 @@ panel_q4_with_trips <- complete_grid_q4 %>%
 panel_q4_with_station <- panel_q4_with_trips %>%
   left_join(station_census_lookup, by = "start_station_id")
 
-# Add hourly weather conditions.
+# Add 30-min weather conditions.
 panel_q4_with_weather <- panel_q4_with_station %>%
-  left_join(weather_clean, by = "interval60")
+  left_join(weather_clean, by = "interval30")
 ```
 
 ```{r complete-panel-q4-lag}
 # Calculate temporal lag features for Q4.
 panel_q4 <- panel_q4_with_weather %>%
-  arrange(start_station_id, interval60) %>%
+  arrange(start_station_id, interval30) %>%
   group_by(start_station_id) %>%
   mutate(
-    # Recent lags for immediate patterns.
-    lag_30min = lag(trips, 0.5),
-    lag_1hr = lag(trips, 1),
-    lag_2hr = lag(trips, 2),
-    lag_3hr = lag(trips, 3),
-    # Add more lags than template for shift work and abnormal work hours.
-    lag_4hr = lag(trips, 4),
-    lag_5hr = lag(trips, 5),
-    lag_6hr = lag(trips, 6),
-    lag_7hr = lag(trips, 7),
-    lag_8hr = lag(trips, 8),
-    lag_9hr = lag(trips, 9),
-    lag_10hr = lag(trips, 10),
-    # Half-day lag for diurnal patterns.
-    lag_12hr = lag(trips, 12),
-    # Full day lag for daily patterns.
-    lag_1day = lag(trips, 24),
-    # Rolling weekly average for baseline.
-    avg_7day = rollapply(trips, 168, mean, fill = NA, align = "right")
+    lag_30min = lag(trips, 1),
+    lag_1hr = lag(trips, 2),
+    lag_1hr30min = lag(trips, 3),
+    lag_2hr = lag(trips, 4),
+    lag_2hr30min = lag(trips, 5),
+    lag_3hr = lag(trips, 6),
+    lag_3hr30min = lag(trips, 7),
+    lag_4hr = lag(trips, 8),
+    lag_4hr30min = lag(trips, 9),
+    lag_5hr = lag(trips, 10),
+    lag_5hr30min = lag(trips, 11),
+    lag_6hr = lag(trips, 12),
+    lag_6hr30min = lag(trips, 13),
+    lag_7hr = lag(trips, 14),
+    lag_7hr30min = lag(trips, 15),
+    lag_8hr = lag(trips, 16),
+    lag_8hr30min = lag(trips, 17),
+    lag_9hr = lag(trips, 18),
+    lag_9hr30min = lag(trips, 19),
+    lag_10hr = lag(trips, 20),
+    lag_10hr30min = lag(trips, 21),
+    lag_11hr = lag(trips, 22),
+    lag_11hr30min = lag(trips, 23),
+    # Half-day lag captures diurnal cycle.
+    lag_12hr = lag(trips, 24),
+    # Full day lag captures day-to-day patterns.
+    lag_1day = lag(trips, 48),
+    # Rolling 7-day average captures weekly baseline.
+    # 168 hours = 7 days * 24 hours.
+    # align = "right" means backwards.
+    avg_7day = rollapply(trips, 336, mean, fill = NA, align = "right")
   ) %>%
   ungroup() %>%
   # Remove rows where weekly average not calculable.
@@ -1035,10 +1048,10 @@ cat("Final 2024 Q4 Panel:", format(nrow(panel_q4), big.mark = ","), "\n")
 # Station 3010 is 15th & Spruce in Center City.
 lag_data_long_q4 <- panel_q4 %>%
   filter(start_station_id == 3010) %>%
-  # Take first week (168 hours).
-  head(168) %>%
+  # Take first week (336 30-min intervals).
+  head(336) %>%
   # Select current trips and all lag variables.
-  select(interval60, current_trips = trips, lag_1hr, lag_2hr, lag_3hr, lag_12hr, lag_1day) %>%
+  select(interval30, current_trips = trips, lag_1hr, lag_2hr, lag_3hr, lag_12hr, lag_1day) %>%
   # Reshape to long format for faceting.
   pivot_longer(
     cols = starts_with("lag"),
@@ -1048,12 +1061,11 @@ lag_data_long_q4 <- panel_q4 %>%
   mutate(lag_type = factor(
     lag_type,
     levels = c("lag_1hr", "lag_2hr", "lag_3hr", "lag_12hr", "lag_1day"),
-    labels = c("1 Hour Ago", "2 Hours Ago", "3 Hours Ago", "12 Hours Ago", "24 Hours Ago")
     )
     )
 
 # Create faceted lag comparison plot for Q4.
-lag_facet_plot_q4 <- ggplot(lag_data_long_q4, aes(x = interval60)) +
+lag_facet_plot_q4 <- ggplot(lag_data_long_q4, aes(x = interval30)) +
   # Plot current demand.
   geom_line(aes(y = current_trips, color = "Current Demand"), linewidth = 0.75, alpha = 0.8) +
   # Plot lagged demand.
@@ -1079,7 +1091,7 @@ lag_facet_plot_q4 <- ggplot(lag_data_long_q4, aes(x = interval60)) +
 lag_data_long_q1 <- panel_q1 %>%
   filter(start_station_id == 3010) %>%
   head(168) %>%
-  select(interval60, current_trips = trips, lag_1hr, lag_2hr, lag_3hr, lag_12hr, lag_1day) %>%
+  select(interval30, current_trips = trips, lag_1hr, lag_2hr, lag_3hr, lag_12hr, lag_1day) %>%
   pivot_longer(
     cols = starts_with("lag"),
     names_to = "lag_type",
@@ -1088,11 +1100,10 @@ lag_data_long_q1 <- panel_q1 %>%
   mutate(lag_type = factor(
     lag_type,
     levels = c("lag_1hr", "lag_2hr", "lag_3hr", "lag_12hr", "lag_1day"),
-    labels = c("1 Hour Ago", "2 Hours Ago", "3 Hours Ago", "12 Hours Ago", "24 Hours Ago")
   ))
 
 # Create faceted lag comparison plot for Q1.
-lag_facet_plot_q1 <- ggplot(lag_data_long_q1, aes(x = interval60)) +
+lag_facet_plot_q1 <- ggplot(lag_data_long_q1, aes(x = interval30)) +
   geom_line(aes(y = current_trips, color = "Current Demand"), linewidth = 0.75, alpha = 0.8) +
   geom_line(aes(y = lag_value, color = "Lagged Demand"), linewidth = 0.75, linetype = "dashed") +
   facet_wrap(~ lag_type, scales = "free_x", ncol = 2) +
@@ -1118,56 +1129,56 @@ lag_facet_plot_q1 <- ggplot(lag_data_long_q1, aes(x = interval60)) +
 
 This is the lag plot of the most popular Indego station at 15th & Spruce in Center City, just 4 or 5 blocks south of City Hall. It looks like the lag plots have a lot more structure in shorter lags, and around 12 hours it still has a similar structure and around 24 is where there's more noise—looks like Tobler's First Law could be applied to temporal aspects.
 
-### ii. Hourly Ridership Patterns
+### ii. 30-min Ridership Patterns
 
-```{r hourly-patterns}
+```{r 30-min-patterns}
 #| fig-dpi: 300
 #| fig-height: 10
 #| fig-width: 12
 
 # Calculate average trips by hour and day type for Q4.
-hourly_patterns_q4 <- panel_q4 %>%
-  group_by(hour, is_weekend) %>%
+min_30patterns_q4 <- panel_q4 %>%
+  group_by(time_continuous, is_weekend) %>%
   summarize(avg_trips = mean(trips, na.rm = TRUE), .groups = "drop") %>%
   mutate(day_type = ifelse(is_weekend, "Weekend", "Weekday"))
 
-# Create hourly pattern plot for Q4.
-hourly_patterns_q4_plot <- ggplot(hourly_patterns_q4, aes(x = hour, y = avg_trips, color = day_type)) +
+# Create 30-min pattern plot for Q4.
+min_30patterns_q4_plot <- ggplot(min_30patterns_q4, aes(x = time_continuous, y = avg_trips, color = day_type)) +
   # Plot as line to show continuous time pattern.
   geom_line(linewidth = 1.5) +
   # Use distinct colors for weekday vs weekend.
   scale_color_manual(values = c("Weekday" = "#08519c", "Weekend" = "#6baed6")) +
   labs(
-    title = "Average Hourly Ridership Patterns",
+    title = "Average 30-min Ridership Patterns",
     subtitle = "2024 Q4",
-    x = "Hour of Day",
-    y = "Average Trips per Hour",
+    x = "30-Min of Day",
+    y = "Average Trips per 30-Min",
     color = "Day Type"
     ) +
   theme_plot()
 
 # Calculate average trips by hour and day type for Q1.
-hourly_patterns_q1 <- panel_q1 %>%
-  group_by(hour, is_weekend) %>%
+min_30patterns_q1 <- panel_q1 %>%
+  group_by(time_continuous, is_weekend) %>%
   summarize(avg_trips = mean(trips, na.rm = TRUE), .groups = "drop") %>%
   mutate(day_type = ifelse(is_weekend, "Weekend", "Weekday"))
 
-# Create hourly pattern plot for Q1.
-hourly_patterns_q1_plot <- ggplot(hourly_patterns_q1, aes(x = hour, y = avg_trips, color = day_type)) +
+# Create 30-min pattern plot for Q1.
+min_30patterns_q1_plot <- ggplot(min_30patterns_q1, aes(x = time_continuous, y = avg_trips, color = day_type)) +
   geom_line(linewidth = 1.5) +
   scale_color_manual(values = c("Weekday" = "#08519c", "Weekend" = "#6baed6")) +
   labs(
-    title = "Average Hourly Ridership Patterns",
+    title = "Average 30-min Ridership Patterns",
     subtitle = "2025 Q1",
     caption = "Average trips per station",
-    x = "Hour of Day",
-    y = "Average Trips per Hour",
+    x = "30-Min of Day",
+    y = "Average Trips per 30-Min",
     color = "Day Type"
     ) +
   theme_plot()
 
 # Stack plots vertically.
-hourly_patterns_q4_plot / hourly_patterns_q1_plot
+min_30patterns_q4_plot / min_30patterns_q1_plot
 ```
 
 It looks like the peak rush hours are maintained even through different seasons (colder Q4 vs. warmer Q1).
@@ -1634,7 +1645,7 @@ table_final <- final_metrics %>%
   select(model, mae, adjusted_r_squared, aic) %>%
   kable(
     caption = "Model Performance Comparison (2024 Q4 vs. 2025 Q1)",
-    col.names = c("Model and Features", "MAE (Trips / Hour)", "Adjusted R²", "AIC"),
+    col.names = c("Model and Features", "MAE (Trips / 30-Min)", "Adjusted R²", "AIC"),
     align = c("l", "c", "c", "c", "c")
   ) %>%
   kable_styling(
@@ -1706,7 +1717,7 @@ mae_comp_plot <- ggplot(mae_plot_data, aes(
     title = "Model Prediction Accuracy Comparison",
     subtitle = "Mean Absolute Error (MAE): 2024 Q4 (2024 Q4) vs. 2025 Q1 models",
     x = "Model Complexity",
-    y = "Mean Absolute Error (Trips per Hour)",
+    y = "Mean Absolute Error (Trips per 30-Min)",
     fill = NULL
   ) +
   theme_plot() +
@@ -1767,11 +1778,11 @@ test_q4_error <- test_clean %>%
     abs_error = abs(error),
     # Categorize hour into time periods.
     time_of_day = case_when(
-      hour < 7 ~ "Overnight",
-      hour >= 7 & hour < 10 ~ "AM Rush",
-      hour >= 10 & hour < 15 ~ "Mid-Day",
-      hour >= 15 & hour <= 18 ~ "PM Rush",
-      hour > 18 ~ "Evening"
+      hour < 7 ~ "Overnight", # 00:00 to 06:59
+      hour >= 7 & hour < 10 ~ "AM Rush", # 07:00 to 09:59
+      hour >= 10 & hour < 15 ~ "Mid-Day", # 10:00 to 14:59
+      hour >= 15 & hour <= 18 ~ "PM Rush", # 15:00 to 18:59
+      hour > 18 ~ "Evening" # 19:00 to 23:59
     )
   )
 
@@ -1801,8 +1812,7 @@ pred_error_q4_map <- ggplot() +
   scale_color_viridis(
     option = "mako",
     name = "MAE (Trips)",
-    direction = -1,
-    breaks = c(0.5, 1.0, 1.5)
+    direction = -1
   ) +
   labs(
     title = "Model Prediction Errors",
@@ -1821,12 +1831,12 @@ avg_dem_q4_map <- ggplot() +
   ) +
   scale_color_viridis(
     option = "mako",
-    name = "Average Demand (Trips per Hour)",
+    name = "Average Demand (Trips per 30-Min)",
     direction = -1
   ) +
   labs(
     title = "Average Station Demand",
-    subtitle = "Trips per Station-Hour (2024 Q4 Test Set)"
+    subtitle = "Trips per Station-30-Min (2024 Q4 Test Set)"
   ) +
   theme_map()
 
@@ -1861,7 +1871,7 @@ obs_vs_pred_plot <- ggplot(test_q4_error, aes(x = trips, y = model2_q4_pred)) +
     title = "Observed vs. Predicted Bike Trips (2024 Q4 Model 2)",
     subtitle = "Red Line = Perfect Predictions\nGreen Line = OLS Fit",
     caption = "Performance grouped by time of day and weekday / weekend.",
-    x = "Observed Trips (Trips per Hour)",
+    x = "Observed Trips (Trips per 30-Min)",
     y = "Predicted Trips (Model 2)"
   ) +
   theme_plot() +
@@ -2052,7 +2062,9 @@ update_model <- lm(
     # Individuals may be more likely to take evening transit.
     (pct_public_commute : is_evening) +
     # Non-white individuals will generally be later.
-    (lag_1hr : pct_poc) + (lag_3hr : pct_poc) + (lag_1day : pct_poc),
+    (lag_30min : pct_poc) + (lag_1hr : pct_poc) + (lag_1hr30min : pct_poc) +
+    (lag_2hr : pct_poc) + (lag_2hr30min : pct_poc) +
+    (lag_3hr : pct_poc) + (lag_1day : pct_poc),
   data = train_clean
   )
 
@@ -2076,9 +2088,24 @@ cat("Percent Improvement:", round(100 * (mae_model2 - mae_update) / mae_model2, 
 # Poisson assumes integer counts and handles overdispersion better.
 poisson_model <- glm(
   trips ~ as.factor(hour) + dow_simple + temp + precip +
+    # Add temporal trend variable.
     days_since_oct1 + is_too_cold +
+    # Add time slot markers.
+    is_evening + is_mid_day + is_morning +
     lag_1hr + lag_3hr + lag_1day +
-    (is_too_cold * days_since_oct1),
+    # Add interaction between cold and time.
+    # Cold might matter more as winter progresses.
+    (is_too_cold * days_since_oct1) +
+    # Add interaction between cold and morning, evening, mid-day.
+    (is_too_cold * is_evening) +
+    (is_too_cold * is_mid_day) +
+    (is_too_cold * is_morning) +
+    # Individuals may be more likely to take evening transit.
+    (pct_public_commute : is_evening) +
+    # Non-white individuals will generally be later.
+    (lag_30min : pct_poc) + (lag_1hr : pct_poc) + (lag_1hr30min : pct_poc) +
+    (lag_2hr : pct_poc) + (lag_2hr30min : pct_poc) +
+    (lag_3hr : pct_poc) + (lag_1day : pct_poc),
   data = train_clean,
   # Use log link for Poisson family.
   family = poisson(link = "log")
@@ -2096,7 +2123,40 @@ cat("OLS Updated Model 2 MAE:", round(mae_update, 4), "\n")
 cat("Poisson Model MAE:", round(mae_poisson, 4), "\n")
 ```
 
-The Poisson model does not have as low an MAE as the OLS model, and by a small margin. This is likely because of overdispersion as the locations of the Indego stations are not uniform. Statistically, Poisson may be good, but OLS is better for deployment despite the data violating a few OLS assumptions.
+The Poisson model has a lower MAE by a small margin. However, it should be noted that the complexities of the models may have overfit due to the number of significant coefficients.
+
+```{r overfit-check}
+#| message: false
+#| warning: false
+
+# Check OLS model.
+# Predict test data.
+test_clean$pred_ols_best <- predict(update_model, newdata = test_clean)
+# Predict train data.
+train_clean$pred_ols_train <- predict(update_model, newdata = train_clean)
+
+mae_test_ols <- mean(abs(test_clean$trips - test_clean$pred_ols_best), na.rm = TRUE)
+mae_train_ols <- mean(abs(train_clean$trips - train_clean$pred_ols_train), na.rm = TRUE)
+
+cat("OLS MAE (Test Set, Out-of-Sample):", round(mae_test_ols, 4), "\n")
+cat("OLS MAE (Train Set, In-Sample): ", round(mae_train_ols, 4), "\n")
+cat("OLS Difference (Train - Test): ", round(mae_train_ols - mae_test_ols, 4), "\n\n")
+
+# Check Poisson model.
+# Predict test data.
+test_clean$pred_poisson_best <- predict(poisson_model, newdata = test_clean, type = "response")
+# Predict train data.
+train_clean$pred_poisson_train <- predict(poisson_model, newdata = train_clean, type = "response")
+
+mae_test_poisson <- mean(abs(test_clean$trips - test_clean$pred_poisson_best), na.rm = TRUE)
+mae_train_poisson <- mean(abs(train_clean$trips - train_clean$pred_poisson_train), na.rm = TRUE)
+
+cat("Poisson MAE (Test Set, Out-of-Sample):", round(mae_test_poisson, 4), "\n")
+cat("Poisson MAE (Train Set, In-Sample): ", round(mae_train_poisson, 4), "\n")
+cat("Poisson Difference (Train - Test): ", round(mae_train_poisson - mae_test_poisson, 4), "\n")
+```
+
+Surprisingly, it looks like the test set for the MAE is lower, so it is generalizing better to the future than the training period.
 
 ```{r station-improvement-map}
 #| fig-dpi: 300
@@ -2195,7 +2255,7 @@ mae_poc_improvement_plot <- ggplot(improvement_demo, aes(x = pct_non_yt, y = imp
     title = "Model Improvement by Station",
     subtitle = "% Non-White Population",
     x = "% Non-White",
-    y = "MAE Improvement (Trips per Hour)",
+    y = "MAE Improvement (Trips per 30-Min)",
     size = "Average Demand"
   ) +
   theme_plot()
@@ -2210,7 +2270,7 @@ mae_inc_improvement_plot <- ggplot(improvement_demo, aes(x = med_inc, y = improv
     title = "Model Improvement by Station",
     subtitle = "Median Income",
     x = "Median Income",
-    y = "MAE Improvement (Trips per Hour)",
+    y = "MAE Improvement (Trips per 30-Min)",
     size = "Average Demand"
   ) +
   theme_plot()
@@ -2225,13 +2285,96 @@ mae_pub_improvement_plot <- ggplot(improvement_demo, aes(x = pct_public_commute,
     subtitle = "% Public Transit Commuters",
     caption = "Points above the dashed line show improvement (MAE decrease).\nChange in MAE (Old MAE - New MAE) vs. Median Income",
     x = "Median Income",
-    y = "MAE Improvement (Trips per Hour)",
+    y = "MAE Improvement (Trips per 30-Min)",
     size = "Average Demand"
   ) +
   theme_plot()
 
 # Stack vertically.
 mae_poc_improvement_plot / mae_inc_improvement_plot / mae_pub_improvement_plot
+```
+
+```{r worsened-stations}
+# Filter improvement data for stations where improvement is negative.
+worse_stations <- improvement_demo %>%
+  filter(improvement <= 0) %>%
+  # Sort by magnitude of negative improvement.
+  arrange(improvement) %>% 
+  select(
+    start_station_id,
+    improvement_mae = improvement,
+    avg_demand = avg_demand,
+    med_inc = med_inc,
+    pct_poc = pct_non_yt,
+    pct_public_commute = pct_public_commute
+  )
+
+# Kable.
+worse_stations_kable <- worse_stations %>%
+  mutate(
+    # Formatting.
+    improvement_mae = round(improvement_mae, 4),
+    avg_demand = round(avg_demand, 2),
+    med_inc = scales::dollar(med_inc),
+    pct_poc = scales::percent(pct_poc, accuracy = 1),
+    pct_public_commute = scales::percent(pct_public_commute, accuracy = 1)
+  ) %>%
+  kable(
+    caption = "Updated Model: Stations Where Feature Engineering Worsened MAE",
+    col.names = c(
+      "Station ID", "MAE Change", "Average Demand", "Median Income", 
+      "% Non-White", "% Public Transit"
+    )
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  )
+
+worse_stations_kable
+```
+
+```{r map-worsened-stations}
+#| fig-dpi: 300
+#| fig-height: 10
+#| fig-width: 10
+
+# Map to see where stations worsened.
+worsened_stations_map_data <- station_improvements %>%
+  filter(improvement < 0)
+
+worsened_map <- ggplot() +
+  # Census tracts.
+  geom_sf(data = philly_census, fill = "#4c6e52", color = "#f5f4f0", linewidth = 0.5) +
+  # Stations with negative improvement.
+  geom_point(
+    data = worsened_stations_map_data,
+    aes(x = start_lon, y = start_lat, 
+        # Color by the negative improvement.
+        color = improvement, 
+        # Size by the absolute error increase.
+        size = abs(improvement)),
+    alpha = 0.9
+  ) +
+  scale_color_gradient(
+    low = "#e83b2e",
+    high = "#990000",
+    name = "MAE Increase (Trips per 30-Min)"
+  ) +
+  guides(
+    size = guide_legend(order = 1),
+    color = guide_colorbar(order = 2)
+  ) +
+  labs(
+    title = "Indego Stations with Worsened Predictions",
+    subtitle = "Philadelphia, PA",
+    caption = "Points show where updated model caused MAE to increase.\nSize indicates the magnitude of the MAE increase.",
+    size = "Absolute Error Increase"
+  ) +
+  theme_map() +
+  theme(legend.box = "vertical")
+
+worsened_map
 ```
 
 ```{r temporal-bias-plot}
@@ -2242,37 +2385,37 @@ mae_poc_improvement_plot / mae_inc_improvement_plot / mae_pub_improvement_plot
 # Calculate final error based on updated model prediction (pred_update).
 test_q4_error_final <- test_clean %>%
     mutate(
-        error_final = trips - pred_update 
+        error_final = trips - pred_update,
+        # Create numeric 0-47 index for plot.
+        time_slot_numeric = hour(interval30) * 2 + minute(interval30) / 30 
     )
 
-# Calculate mean error by hour and day type.
-# Mean error shows systematic over/under-prediction.
+# Calculate bias based on 30-min time.
 temporal_bias_final <- test_q4_error_final %>%
-  group_by(hour, is_weekend) %>%
+  group_by(time_slot_numeric, is_weekend) %>%
   summarize(
-    # Positive = under-prediction, Negative = over-prediction.
     mean_error = mean(error_final, na.rm = TRUE),
     .groups = "drop"
-  ) %>%
+    ) %>%
   mutate(day_type = ifelse(is_weekend, "Weekend", "Weekday"))
 
-# Line plot of bias.
-bias_plot <- ggplot(temporal_bias_final, aes(x = hour, y = mean_error, color = day_type)) +
+# Bias line plot.
+bias_plot <- ggplot(temporal_bias_final, aes(x = time_slot_numeric, y = mean_error, color = day_type)) +
   # Add reference line at zero.
   geom_hline(yintercept = 0, linetype = "dashed", color = "#f48f33", linewidth = 1) +
   # Line with points.
   geom_line(linewidth = 1.5) +
   geom_point(size = 3) +
-  # Define colors for day types.
   scale_color_manual(values = c("Weekday" = "#08519c", "Weekend" = "#6baed6")) +
+  scale_x_continuous(breaks = seq(0, 48, by = 4), labels = seq(0, 24, by = 2)) +
   labs(
-    title = "Prediction Bias by Hour and Day Type",
+    title = "Prediction Bias by 30-Minute Intervals and Day Type",
     subtitle = "2024 Q4 Test Set",
     caption = "Positive values mean the model under-predicts (demand > prediction).\nMean Error (Actual Trips - Predicted Trips)",
-    x = "Hour of Day",
-    y = "Mean Error (Trips per Hour)",
+    x = "Hour",
+    y = "Mean Error (Trips per 30-Min)",
     color = "Day Type"
-  ) +
+    ) +
   theme_plot()
 
 bias_plot
@@ -2311,35 +2454,71 @@ temp_residuals_plot
 
 For the added features in the updated model, two variables `days_since_oct1` and `is_too_cold` were created and added to the model. The first was chosen to represent the previous observation that ridership was decreasing heading further into the winter season, and the second variable was *because* of the winter season.
 
-After trying a few numbers it looked like 37 degrees was the ideal threshold to decrease MAE, shooting it up from a 2.02% improvement with just `days_since_oct1` to 2.44% improvement in MAE after it was added. For the previous Q4 model 2 it had a 0.3934 MAE versus the updated Q4 model 2 having a 0.3838 MAE, while marginal, it is still an improvement, especially when looking at the above visualizations for the updated model.
+Then, flags for evening and mid-day hours were created, for 7:00 PM to 11:00 PM and 10:00 AM to 3:00 PM, respectively. This is because when the previously mentioned added features were run, it was still visible that there was systematic under-prediction during those times.
 
-Then, flags for evening and mid-day hours were created, for 19 to 23 (7:00 PM to 11:00 PM) and 10 to 15 (10:00 AM to 3:00 PM), respectively. This is because when the previously mentioned added features were run, it was still visible that there was systematic under-prediction during those times. After adding `is_evening` and `is_mid_day` there was actually no increase. However, when adding their interactions with `is_too_cold`, it shot up to 4.51% improvement.
+Another interaction that was included was `is_evening` and `pct_public_commute`, because people may prefer public transit because they are tired and to protect them from weather on the way home from work.
+
+What eventually increased the predictive model up to 9.51% improvement in MAE were the lag interactions with the created POC (people of color) variable. This logic came from personal experience, as non-white individuals, whether US or foreign, retain cultural habits and are influenced by time perception, especially since time is communicated differently in different languages.
+
+It's also important to note that the interactions that were included did not include the main effects plus the interaction term, I was explicit about not using race itself as it actually worsened the model.
+
+New terms and interactions:
+
+- `is_too_cold`
+- `is_evening`
+- `is_mid_day`
+- `is_morning`
+- `pct_public_commute`
+- `pct_poc`
+- `(is_too_cold * is_evening)`
+- `(is_too_cold * is_mid_day)`
+- `(is_too_cold * is_morning)`
+- `(pct_public_commute : is_evening)`
+- `(lag_30min : pct_poc)`
+- `(lag_1hr : pct_poc)`
+- `(lag_1hr30min : pct_poc)`
+- `(lag_2hr : pct_poc)`
+- `(lag_2hr30min : pct_poc)`
+- `(lag_3hr : pct_poc)`
+- `(lag_1day : pct_poc)`
 
 In the model improvement map, it looks like the vast majority of stations had MAE improvements, although it doesn't give a more granular look like the plot, which looks at how the stations changed across different demographics: non-white, median income, and public transit commuters. Around 3 stations look like their MAE increased (worsened) or were stagnant, with some other stations having very marginal improvements being just barely above the line.
 
-Looking at prediction bias across hours and day types, it looks like this updated model systematically underestimates the demand surge during the morning commute, even after going back to specifically try and improve these times. This is critical as bikes will run out. Then there's a mid-day dip between 9:00 and 15:00 (3:00 PM), the pit being at 12, so it is predicting a big and sustained usage in the middle of the day that doesn't actually materialize. The case is the same with 21:00 (9:00 PM) with the lowest pit in the plot where the model misses that evening shutdown. Also critical, because now bikes are accumulating at stations in the evening.
+Looking at prediction bias across hours and day types, it looks like this updated model systematically underestimates the demand surge during the morning commute, even after going back to specifically try and improve these times.
+
+According to Indego's station list, these are the worsened locations in the Center City area, which are currently active.
+
+- 3064, 18th & Washington, Chew Playground
+- 3363, 13th & Spruce
+- 3028, 4th & Bainbridge
+- 3165, 24th & Race SRT
+
+It looks like these areas generally have a median income higher than \$100,000 except for station 3363 with around \$60,000.
 
 # PART IV: CRITICAL REFLECTION
 
 ## 1. Operational Implications
 
-1.  **Operational implications:**
-    -   Is your final MAE "good enough" for Indego to use?
-    -   When do prediction errors cause problems for rebalancing?
-    -   Would you recommend deploying this system? Under what
-        conditions?
+It looks like the final MAE is "good enough" for Indego's use. An error of 0.23 trips per 30-minutes indicates the model is generally off by a bike every two hours in each station, so a low error rate like this could help Indego employees better manage bike stations and bike availability.
+
+On the previous statement about prediction bias during mornings, this is critical as bikes will run out. Then there's a mid-day dip between 9:00 AM and 3:00 PM, the pit being at 12, so it is predicting a big and sustained usage in the middle of the day that doesn't actually materialize. The case is the same with 9:00 PM with the lowest pit in the plot where the model misses that evening shutdown. Also critical, because now bikes are accumulating at stations in the evening.
+
+I would recommend deploying this system as an aid, not an end-all-be-all solution, even with a narrow MAE, it is not 0.
 
 ## 2. Equity Considerations
+    
+The initial model does show a socioeconomic bias as described at the end of the previous section. So it is important to deploy safeguard rails since highest MAE is still in Center City. This means resource allocation could divert limited resources away from stations with lower demand and transit-dependent neighborhoods where the model says it's accurate. Contextually, it could affect communities with less mobility. A rail could be creating different weights for communities that are less mobile.
 
-2.  **Equity considerations:**
-    -   Do prediction errors disproportionately affect certain
-        neighborhoods?
-    -   Could this system worsen existing disparities in bike access?
-    -   What safeguards would you recommend?
+To add more to the POC and lag interactions, a lot of online and offline American spaces often reference "Asian time", "Black people time", "Mexican time", "CPT time (colored people time)" etc. within ethnic and/or racial communities.
+
+Some of the terms have been used pejoratively, especially CPT time's etymology rooted in racism and anti-Blackness in Antebellum South, which was weaponized by white slave-owners to further permit cruelty and dehumanization.
+
+While they were negatively used to prescribe laziness to Black individuals (then other races downstream as the US diversified), these are real habits that are mostly constrained and perceived negatively in the context of Western punctuality.
 
 ## 3. Model Limitations
 
-3.  **Model limitations:**
-    -   What patterns is your model missing?
-    -   What assumptions might not hold in real deployment?
-    -   How would you improve this with more time/data?
+Another helpful method could be to try Negative Binomial and compare with the Poisson model's MAE.
+
+This model is assuming that stations are at capacity with all available bikes, but deployment in reality relies on human behavior and real-world urban variability, so additional data on real-time availability (which does exist in the Indego app) and inventory would be helpful for the predictive model.
+
+Spatial proximity to bike lanes could also be helpful, although I am slightly skeptical it could improve MAE drastically as a lot of bikers do ride on sidewalks, but that is a separate conversation because it may mean a lack of safe biking infrastructure.
