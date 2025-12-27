@@ -1,7 +1,7 @@
 ---
-title: SPACE-TIME PREDICTION OF BIKE SHARE DEMAND
-subtitle: 2025 Q1 VS 2024 Q4 HISTORICAL MODEL
-date: 2025-11-17
+title: Space-Time Prediction of Bike Share Demand
+subtitle: 2025 Q1 VS 2024 Q4
+date: 2025-12-01
 author:
   - name: Tess Vu
     email:
@@ -75,17 +75,11 @@ showtext_auto()
 
 # Get rid of scientific notation.
 options(scipen = 999)
-
-# Save figures.
-knitr::opts_chunk$set(
-  dev = "png",
-  fig.path = "figures/"
-)
 ```
 
 ```{r plot-themes}
 # Create custom plot theme for charts.
-theme_plot <- function(base_size = 11) {
+theme_plot <- function(base_size = 23) {
   theme_minimal(base_size = base_size) +
     theme(
       # Set title styling with custom font and color.
@@ -156,7 +150,7 @@ theme_plot <- function(base_size = 11) {
 
 # Create custom theme for maps.
 # Similar to plot theme but removes axis elements.
-theme_map <- function(base_size = 11) {
+theme_map <- function(base_size = 17) {
   theme_minimal(base_size = base_size) +
     theme(
       plot.title = element_text(face = "bold",
@@ -679,7 +673,6 @@ weather_data <- read.csv("data/PHL.csv") %>%
   # Select relevant weather variables.
   select(valid, tmpf, dwpf, relh, sknt, p01i, vsby, gust, wxcodes, feel) %>%
   rename(
-    # Renamed to 'interval_raw' to avoid confusion with the final bin size.
     interval_raw = valid, 
     temp = tmpf,
     dew = dwpf,
@@ -718,7 +711,6 @@ weather_clean <- weather_data %>%
     # Interpolate sparse missing values (as before).
     temp = na.approx(temp, na.rm = FALSE),
     dew = na.approx(dew, na.rm = FALSE),
-    # ... other interpolations ...
     precip = ifelse(is.na(precip), 0, precip),
     gust = ifelse(is.na(gust), 0, gust),
     w_code = case_when(is.na(w_code) | w_code == "" ~ "CLR", TRUE ~ w_code)
@@ -1085,7 +1077,7 @@ lag_facet_plot_q4 <- ggplot(lag_data_long_q4, aes(x = interval30)) +
     y = "Average Trip Count"
     ) +
   theme_plot() +
-  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 10))
+  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 20))
 
 # Repeat for Q1 data.
 lag_data_long_q1 <- panel_q1 %>%
@@ -1118,7 +1110,7 @@ lag_facet_plot_q1 <- ggplot(lag_data_long_q1, aes(x = interval30)) +
     y = "Trip Count"
   ) +
   theme_plot() +
-  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 10))
+  theme(strip.text = element_text(family = "anonymous", face = "bold", size = 20))
 
 # Stack plots vertically with shared legend.
 (lag_facet_plot_q1 / lag_facet_plot_q4) +
@@ -1693,14 +1685,14 @@ mae_comp_plot <- ggplot(mae_plot_data, aes(
   fill = forecast_type
 )) +
   # Create bars with border.
-  geom_col(alpha = 0.9,
+  geom_col(alpha = 1,
     colour = "#3d3b3c",
     linewidth = 1) +
   # Add value labels on top of bars.
   geom_text(
     aes(label = round(mae, 3)),
     vjust = -0.3,
-    size = 3.5,
+    size = 6,
     color = "#2d2a26",
     family = "anonymous"
   ) +
@@ -1723,13 +1715,13 @@ mae_comp_plot <- ggplot(mae_plot_data, aes(
   theme_plot() +
   theme(
     # Angle x-axis labels.
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 20),
     # Hide legend since colors labeled in facets.
     legend.position = "none",
     # Format facet labels.
     strip.text = element_text(
       face = "bold",
-      size = 10,
+      size = 20,
       family = "outfit",
       color = "#2d2a26"
     )
@@ -1876,11 +1868,11 @@ obs_vs_pred_plot <- ggplot(test_q4_error, aes(x = trips, y = model2_q4_pred)) +
   ) +
   theme_plot() +
   theme(
-    axis.text.x = element_text(hjust = 1, size = 8),
+    axis.text.x = element_text(hjust = 1, size = 20),
     legend.position = "none",
     strip.text = element_text(
       face = "bold",
-      size = 10,
+      size = 20,
       family = "anonymous",
       color = "#2d2a26"
     )
@@ -1910,6 +1902,13 @@ temp_error_plot <- ggplot(temporal_errors_q4, aes(x = time_of_day, y = MAE, fill
   geom_col(position = "dodge",
     colour = "#3d3b3c",
     linewidth = 1) +
+  # Add value labels on top of bars.
+  geom_text(
+    aes(label = round(MAE, 3)),
+    size = 6,
+    color = "#2d2a26",
+    family = "anonymous"
+  ) +
   # Colors for day types.
   scale_fill_manual(values = c("Weekday" = "#f6a2a7", "Weekend" = "#8bcef2")) +
   labs(
@@ -2421,37 +2420,6 @@ bias_plot <- ggplot(temporal_bias_final, aes(x = time_slot_numeric, y = mean_err
 bias_plot
 ```
 
-```{r residuals-vs-temp}
-#| message: false
-#| warning: false
-#| fig-dpi: 300
-#| fig-height: 8
-#| fig-width: 10
-
-# Calculate residuals for updated model.
-test_clean <- test_clean %>%
-  mutate(residual = trips - pred_update)
-
-# Scatter plot of residuals vs temperature.
-temp_residuals_plot <- ggplot(test_clean, aes(x = temp, y = residual)) +
-  # Plot with high transparency to show density.
-  geom_point(alpha = 0.1, color = "#EF4269") +
-  # Reference line at zero residual.
-  geom_hline(yintercept = 0, linetype = "dashed", color = "#4269EF", linewidth = 1) +
-  # LOESS smooth to show non-linear pattern.
-  geom_smooth(method = "loess", color = "purple", se = TRUE, linewidth = 1) +
-  labs(
-    title = "Model Residuals vs. Temperature",
-    subtitle = "Updated OLS Model (2024 Q4 Test Set)",
-    caption = "Pink curve is the average bias across temperature.",
-    x = "Temperature (°F)",
-    y = "Residual (Actual Trips - Predicted Trips)"
-  ) +
-  theme_plot()
-
-temp_residuals_plot
-```
-
 For the added features in the updated model, two variables `days_since_oct1` and `is_too_cold` were created and added to the model. The first was chosen to represent the previous observation that ridership was decreasing heading further into the winter season, and the second variable was *because* of the winter season.
 
 Then, flags for evening and mid-day hours were created, for 7:00 PM to 11:00 PM and 10:00 AM to 3:00 PM, respectively. This is because when the previously mentioned added features were run, it was still visible that there was systematic under-prediction during those times.
@@ -2522,3 +2490,13 @@ Another helpful method could be to try Negative Binomial and compare with the Po
 This model is assuming that stations are at capacity with all available bikes, but deployment in reality relies on human behavior and real-world urban variability, so additional data on real-time availability (which does exist in the Indego app) and inventory would be helpful for the predictive model.
 
 Spatial proximity to bike lanes could also be helpful, although I am slightly skeptical it could improve MAE drastically as a lot of bikers do ride on sidewalks, but that is a separate conversation because it may mean a lack of safe biking infrastructure.
+
+I also was correct in assuming that making the temporal aspect more granular would improve prediction as well since a lot of events and work days can start at 30-minute marks. I am unsure of 15-minute granularity, but it couldn't hurt to see if there's improvement.
+
+# NOTE: Credit and AI Usage
+
+**Free version of Claude Sonnet 4.5 used for debugging code, especially the final panel data portion.**
+
+Base code template provided by Dr. Delmelle with adjustments changing it from hourly analysis to 30-minute interval analysis.
+
+Visuals taken from previous labs and lecture examples and modified.
